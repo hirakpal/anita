@@ -163,10 +163,12 @@ class AnthropicLLMClient:
 
     def __init__(self, model: str = "claude-sonnet-4-6", api_key: str | None = None):
         import anthropic  # local import so the mock path has no hard dependency
+        from tracing import TraceStore
 
         self.model = model
         self.client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
         self.stats = CacheStats()
+        self.traces = TraceStore()
 
     def chat_structured(
         self,
@@ -192,34 +194,56 @@ class AnthropicLLMClient:
         if dynamic_context:
             system_blocks.append({"type": "text", "text": dynamic_context})
 
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=2000,
-            system=system_blocks,
-            messages=messages,
-            tools=[CHAT_TURN_TOOL],
-            tool_choice={"type": "tool", "name": "record_turn"},
-        )
+        trace_ctx = self.traces.start("chat_structured", system, dynamic_context, messages)
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                system=system_blocks,
+                messages=messages,
+                tools=[CHAT_TURN_TOOL],
+                tool_choice={"type": "tool", "name": "record_turn"},
+            )
+        except Exception as e:
+            self.traces.fail(trace_ctx, e)
+            raise
+
         self.stats.record(response.usage)
         for block in response.content:
             if block.type == "tool_use" and block.name == "record_turn":
-                return _normalize_turn(block.input)
+                parsed = _normalize_turn(block.input)
+                self.traces.finish(trace_ctx, response=parsed, usage=response.usage)
+                return parsed
         # Should be unreachable with forced tool_choice, but never trust
         # that fully -- fall through to a safe empty turn rather than
         # raising, so ResilientLLMClient's fallback path (which expects
         # exceptions, not None) still isn't the only safety net.
-        raise ValueError("Model did not return a record_turn tool call despite forced tool_choice.")
+        no_tool_error = ValueError("Model did not return a record_turn tool call despite forced tool_choice.")
+        self.traces.fail(trace_ctx, no_tool_error)
+        raise no_tool_error
 
     def complete_json(self, system: str, user_content: str) -> dict[str, Any]:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=2000,
-            system=system,
-            messages=[{"role": "user", "content": user_content}],
-        )
+        trace_ctx = self.traces.start("complete_json", system, "", [{"role": "user", "content": user_content}])
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=2000,
+                system=system,
+                messages=[{"role": "user", "content": user_content}],
+            )
+        except Exception as e:
+            self.traces.fail(trace_ctx, e)
+            raise
+
         self.stats.record(response.usage)
         text = "".join(block.text for block in response.content if block.type == "text")
-        return _safe_parse_json(text)
+        try:
+            parsed = _safe_parse_json(text)
+        except Exception as e:
+            self.traces.fail(trace_ctx, e)
+            raise
+        self.traces.finish(trace_ctx, response=parsed, usage=response.usage)
+        return parsed
 
 
 class ResilientLLMClient:
@@ -244,6 +268,11 @@ class ResilientLLMClient:
     def stats(self) -> CacheStats | None:
         """Expose the primary client's cache stats, if it tracks them."""
         return getattr(self.primary, "stats", None)
+
+    @property
+    def traces(self) -> "TraceStore | None":
+        """Expose the primary client's trace log, if it tracks one."""
+        return getattr(self.primary, "traces", None)
 
     def chat_structured(
         self,
