@@ -12,7 +12,50 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+
+@dataclass
+class CacheStats:
+    """
+    Cumulative token usage across all calls made through a client,
+    broken out by cache status. Surfaced in the UI so prompt caching's
+    effect is visible/provable, not just theoretical.
+
+    cache_read_tokens: tokens served from cache (billed at ~10% of
+      normal input price). cache_creation_tokens: tokens written to
+      cache on a miss (billed at a premium, ~1.25x, but only once per
+      TTL window). uncached_input_tokens: input tokens that were never
+      part of a cacheable block (e.g. the per-turn dynamic profile state,
+      by design -- see chat_structured's dynamic_context parameter).
+    """
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    uncached_input_tokens: int = 0
+    output_tokens: int = 0
+    call_count: int = 0
+
+    def record(self, usage: Any) -> None:
+        """Accumulate stats from an Anthropic API response.usage object."""
+        self.cache_read_tokens += getattr(usage, "cache_read_input_tokens", 0) or 0
+        self.cache_creation_tokens += getattr(usage, "cache_creation_input_tokens", 0) or 0
+        self.uncached_input_tokens += getattr(usage, "input_tokens", 0) or 0
+        self.output_tokens += getattr(usage, "output_tokens", 0) or 0
+        self.call_count += 1
+
+    @property
+    def estimated_savings_pct(self) -> float:
+        """
+        Rough estimate of input-token cost saved vs. an uncached baseline.
+        Cached reads cost ~10% of normal input price, so each cache-read
+        token "saves" ~90% of what it would have cost uncached.
+        """
+        total_input = self.cache_read_tokens + self.cache_creation_tokens + self.uncached_input_tokens
+        if total_input == 0:
+            return 0.0
+        saved = self.cache_read_tokens * 0.9
+        return round(100 * saved / total_input, 1)
 
 
 class LLMClient(Protocol):
@@ -20,6 +63,7 @@ class LLMClient(Protocol):
         self,
         system: str,
         messages: list[dict[str, str]],
+        dynamic_context: str = "",
     ) -> dict[str, Any]:
         """
         Chat-Assistant-specific. Send a conversation to the model and
@@ -35,6 +79,12 @@ class LLMClient(Protocol):
         use complete_json() instead, since their output shapes differ per
         sub-engine (scored lists, sequenced days, etc.), not the chat-turn
         schema above.
+
+        `system` is the STATIC instruction text (same every turn) -- this
+        is what gets cached. `dynamic_context`, if provided, is appended
+        after the cache breakpoint as fresh, uncached content (e.g. the
+        current traveller_profile state, which changes every turn and
+        would break the cache if it were part of `system` itself).
         """
         ...
 
@@ -116,21 +166,41 @@ class AnthropicLLMClient:
 
         self.model = model
         self.client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
+        self.stats = CacheStats()
 
-    def chat_structured(self, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat_structured(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        dynamic_context: str = "",
+    ) -> dict[str, Any]:
         # Forced tool-use, not prompt-only JSON instructions: the model
         # MUST call record_turn and its input arrives already parsed by
         # the SDK -- this is materially more reliable than asking a model
         # to format free text as JSON, which it can (and does, sometimes)
         # ignore in favor of a natural conversational reply.
+        #
+        # System is split into two blocks: the static instruction text
+        # (cached -- same every turn, ~16KB, the expensive part to
+        # resend) and dynamic_context (NOT cached -- the current
+        # traveller_profile state, which changes every turn by design).
+        # This is the highest-value caching pattern: a large stable
+        # prefix with small fresh content appended after the breakpoint.
+        system_blocks = [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
+        ]
+        if dynamic_context:
+            system_blocks.append({"type": "text", "text": dynamic_context})
+
         response = self.client.messages.create(
             model=self.model,
             max_tokens=2000,
-            system=system,
+            system=system_blocks,
             messages=messages,
             tools=[CHAT_TURN_TOOL],
             tool_choice={"type": "tool", "name": "record_turn"},
         )
+        self.stats.record(response.usage)
         for block in response.content:
             if block.type == "tool_use" and block.name == "record_turn":
                 return _normalize_turn(block.input)
@@ -147,6 +217,7 @@ class AnthropicLLMClient:
             system=system,
             messages=[{"role": "user", "content": user_content}],
         )
+        self.stats.record(response.usage)
         text = "".join(block.text for block in response.content if block.type == "text")
         return _safe_parse_json(text)
 
@@ -169,13 +240,23 @@ class ResilientLLMClient:
         self.fallback = fallback
         self.on_fallback = on_fallback
 
-    def chat_structured(self, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+    @property
+    def stats(self) -> CacheStats | None:
+        """Expose the primary client's cache stats, if it tracks them."""
+        return getattr(self.primary, "stats", None)
+
+    def chat_structured(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        dynamic_context: str = "",
+    ) -> dict[str, Any]:
         try:
-            return self.primary.chat_structured(system, messages)
+            return self.primary.chat_structured(system, messages, dynamic_context)
         except Exception as e:
             if self.on_fallback:
                 self.on_fallback(e)
-            return self.fallback.chat_structured(system, messages)
+            return self.fallback.chat_structured(system, messages, dynamic_context)
 
     def complete_json(self, system: str, user_content: str) -> dict[str, Any]:
         try:
@@ -195,7 +276,12 @@ class SafeFallbackClient:
     content. No profile_updates, no crash -- just asks the user to retry.
     """
 
-    def chat_structured(self, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat_structured(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        dynamic_context: str = "",
+    ) -> dict[str, Any]:
         return {
             "reply": "Sorry, I had trouble processing that just now — could you try rephrasing or sending that again?",
             "profile_updates": {},
@@ -227,7 +313,12 @@ class MockLLMClient:
         self._json_calls = list(scripted_json_calls or [])
         self._json_index = 0
 
-    def chat_structured(self, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def chat_structured(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        dynamic_context: str = "",
+    ) -> dict[str, Any]:
         if self._turn_index >= len(self._turns):
             raise IndexError("MockLLMClient: no more scripted chat turns available")
         turn = self._turns[self._turn_index]
