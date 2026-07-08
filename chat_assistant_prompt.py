@@ -7,7 +7,9 @@ traveller profile (identity + trip + preferences), and emitting structured
 JSON for downstream ranking/itinerary agents.
 """
 
-CHAT_ASSISTANT_SYSTEM_PROMPT = """\
+import json
+
+_CHAT_ASSISTANT_SYSTEM_PROMPT_BASE = """\
 You are the conversational front-end of a travel planning system. You own \
 everything upstream of the Recommendation Engine: understanding the user, \
 building a rich traveller profile (identity + trip + preferences), and \
@@ -211,9 +213,19 @@ structured profile is being built behind every reply.
    conversation continues
 
 When you have gathered enough to proceed, emit the traveller_profile JSON
-(matching TRAVELLER_PROFILE_SCHEMA below) as your structured output for
-the Recommendation Engine, alongside your natural-language reply to the
-user.
+(matching the exact schema printed below, using those exact nested key
+paths) as your structured output for the Recommendation Engine, alongside
+your natural-language reply to the user.
+
+## Continuing after client-side actions
+Some steps (like locking in a map location) happen entirely in the UI and
+never go through you directly -- but you will then receive a follow-up
+message telling you what just happened (e.g. "I've locked in my location
+as my base"). Treat this exactly like any other turn: check whether the
+profile is now sufficient (destination, dates/duration, travelers, and
+ideally budget all known) and, if so, respond warmly confirming you're
+building their plan now and set trigger_recommendation=true. Don't ask
+the user to repeat information you already have.
 """
 
 
@@ -380,6 +392,24 @@ TRAVELLER_PROFILE_SCHEMA = {
     },
     "profile_completeness": None,  # "partial" | "sufficient" | "complete"
 }
+
+
+# The actual system prompt sent to the model. Critically, this embeds the
+# real TRAVELLER_PROFILE_SCHEMA as JSON text -- the model only ever sees
+# this string, never the Python dict above, so a bare name-reference to
+# "TRAVELLER_PROFILE_SCHEMA" in the prose was not enough for the model to
+# know the exact nested key paths (trip.destination.confirmed vs some
+# other guess). This was the root cause of profile_updates silently
+# omitting fields the user had clearly already provided.
+CHAT_ASSISTANT_SYSTEM_PROMPT = (
+    _CHAT_ASSISTANT_SYSTEM_PROMPT_BASE
+    + "\n## Exact traveller_profile schema\n"
+    + "Use these exact nested key paths in profile_updates. Only include "
+    + "fields you are setting or changing this turn -- omit everything "
+    + "else, don't resend the whole schema each turn.\n\n```json\n"
+    + json.dumps(TRAVELLER_PROFILE_SCHEMA, indent=2)
+    + "\n```\n"
+)
 
 
 def new_traveller_profile() -> dict:
