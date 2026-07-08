@@ -21,7 +21,7 @@ import pandas as pd
 import pydeck as pdk
 import streamlit as st
 
-from llm_client import MockLLMClient
+from llm_client import MockLLMClient, ResilientLLMClient, SafeFallbackClient
 from orchestrator import (
     ConversationState,
     apply_map_selection,
@@ -29,10 +29,8 @@ from orchestrator import (
     process_turn,
 )
 
-USE_REAL_LLM = False  # flip to True once ANTHROPIC_API_KEY is set and tested
-
 # A small deterministic demo script so the whole app is click-through-able
-# without a live model. Swap for AnthropicLLMClient() when ready.
+# without a live model, and used as the visible chat script in mock mode.
 DEMO_SCRIPT = [
     {
         "reply": "A Japan trip sounds wonderful! How many of you are traveling, and for how long?",
@@ -64,11 +62,31 @@ DEMO_SCRIPT = [
 ]
 
 
+def get_api_key() -> str | None:
+    """Check Streamlit secrets first (how the deployed app is configured),
+    then fall back to environment variable (local/dev runs)."""
+    try:
+        if "ANTHROPIC_API_KEY" in st.secrets:
+            return st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        pass  # no secrets.toml present locally -- not an error
+    return os.environ.get("ANTHROPIC_API_KEY")
+
+
 def get_llm_client():
-    if USE_REAL_LLM and os.environ.get("ANTHROPIC_API_KEY"):
-        from llm_client import AnthropicLLMClient
-        return AnthropicLLMClient()
-    return MockLLMClient(DEMO_SCRIPT)
+    api_key = get_api_key()
+    if not api_key:
+        return MockLLMClient(DEMO_SCRIPT)
+
+    from llm_client import AnthropicLLMClient
+
+    primary = AnthropicLLMClient(api_key=api_key)
+    fallback = SafeFallbackClient()
+
+    def on_fallback(exc):
+        st.session_state.setdefault("fallback_warnings", []).append(str(exc))
+
+    return ResilientLLMClient(primary, fallback, on_fallback=on_fallback)
 
 
 def init_state():
@@ -198,6 +216,14 @@ def main():
 
     st.title("🧭 Travel Planning Assistant")
     st.caption("Chat naturally — destination, dates, and preferences are picked up automatically.")
+
+    mode_label = "🟢 LIVE (Claude)" if get_api_key() else "🟡 MOCK (scripted demo)"
+    st.caption(f"Mode: {mode_label}")
+
+    if st.session_state.get("fallback_warnings"):
+        with st.expander(f"⚠️ {len(st.session_state['fallback_warnings'])} live call(s) fell back to safe mode", expanded=False):
+            for w in st.session_state["fallback_warnings"]:
+                st.caption(w)
 
     chat_col, side_col = st.columns([2, 1])
 

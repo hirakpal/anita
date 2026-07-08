@@ -104,6 +104,62 @@ class AnthropicLLMClient:
         return _safe_parse_json(text)
 
 
+class ResilientLLMClient:
+    """
+    Wraps a primary client (e.g. AnthropicLLMClient) with a fallback client
+    (e.g. MockLLMClient) used if the primary raises for any reason --
+    network error, rate limit, bad key, malformed JSON response. Exists
+    specifically for live demos: a transient API failure degrades to a
+    scripted response instead of crashing the app mid-conversation.
+
+    `on_fallback`, if provided, is called with the exception whenever a
+    fallback happens -- wire this to a UI warning (e.g. st.warning) so the
+    failure is visible rather than silent.
+    """
+
+    def __init__(self, primary: "LLMClient", fallback: "LLMClient", on_fallback=None):
+        self.primary = primary
+        self.fallback = fallback
+        self.on_fallback = on_fallback
+
+    def chat_structured(self, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+        try:
+            return self.primary.chat_structured(system, messages)
+        except Exception as e:
+            if self.on_fallback:
+                self.on_fallback(e)
+            return self.fallback.chat_structured(system, messages)
+
+    def complete_json(self, system: str, user_content: str) -> dict[str, Any]:
+        try:
+            return self.primary.complete_json(system, user_content)
+        except Exception as e:
+            if self.on_fallback:
+                self.on_fallback(e)
+            return self.fallback.complete_json(system, user_content)
+
+
+class SafeFallbackClient:
+    """
+    Purpose-built fallback for ResilientLLMClient -- NOT the scripted demo
+    mock. Always returns a graceful, turn-agnostic response rather than a
+    scripted one, since a live failure could happen on any turn and a
+    scripted response tied to turn-index would desync and return the wrong
+    content. No profile_updates, no crash -- just asks the user to retry.
+    """
+
+    def chat_structured(self, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
+        return {
+            "reply": "Sorry, I had trouble processing that just now — could you try rephrasing or sending that again?",
+            "profile_updates": {},
+            "trigger_recommendation": False,
+            "show_map": None,
+        }
+
+    def complete_json(self, system: str, user_content: str) -> dict[str, Any]:
+        return {}
+
+
 class MockLLMClient:
     """
     Deterministic test double. Takes a pre-scripted list of chat-turn
