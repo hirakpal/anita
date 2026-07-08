@@ -89,8 +89,21 @@ CHAT_TURN_TOOL = {
                     "if this turn should trigger it. Empty string if not."
                 ),
             },
+            "show_family_form": {
+                "type": "boolean",
+                "description": (
+                    "True if this turn should offer the user a short inline "
+                    "form to add names/ages/relations of family or group "
+                    "members traveling with them. Only offer once, and only "
+                    "when traveller_composition indicates more than one "
+                    "traveler and members haven't been captured yet."
+                ),
+            },
         },
-        "required": ["reply", "profile_updates", "trigger_recommendation", "show_map_destination"],
+        "required": [
+            "reply", "profile_updates", "trigger_recommendation",
+            "show_map_destination", "show_family_form",
+        ],
     },
 }
 
@@ -188,6 +201,7 @@ class SafeFallbackClient:
             "profile_updates": {},
             "trigger_recommendation": False,
             "show_map": None,
+            "show_family_form": False,
         }
 
     def complete_json(self, system: str, user_content: str) -> dict[str, Any]:
@@ -241,6 +255,7 @@ def _normalize_turn(tool_input: dict[str, Any]) -> dict[str, Any]:
         "profile_updates": tool_input.get("profile_updates", {}) or {},
         "trigger_recommendation": bool(tool_input.get("trigger_recommendation", False)),
         "show_map": {"destination": destination} if destination.strip() else None,
+        "show_family_form": bool(tool_input.get("show_family_form", False)),
     }
 
 
