@@ -374,6 +374,27 @@ def render_family_form():
             apply_family_members(st.session_state.conversation, members)
             st.session_state.show_family_form = False
             del st.session_state.family_draft
+
+            # Same fix as the map lock-in: saving the form is client-side
+            # only and never calls the LLM on its own, so without an
+            # explicit follow-up turn the conversation just stalls --
+            # the model never gets a chance to acknowledge what was saved
+            # or notice the profile might now be sufficient to proceed.
+            saved_names = [
+                f"{m['name']} ({m['relation']})" if m["relation"] else m["name"]
+                for m in st.session_state.conversation.profile["traveller_composition"]["members"]
+            ]
+            summary = ", ".join(saved_names) if saved_names else "no additional companions"
+            with st.spinner("Continuing..."):
+                result = process_turn(
+                    st.session_state.conversation,
+                    f"I've added who's traveling with me: {summary}.",
+                    st.session_state.llm_client,
+                )
+            st.session_state.chat_history.append(("assistant", result["reply"]))
+            if result.get("show_map"):
+                st.session_state.map_destination = result["show_map"]["destination"]
+
             st.success("Got it — saved who's traveling with you.")
             st.rerun()
     with skip_col:
@@ -381,6 +402,16 @@ def render_family_form():
             st.session_state.show_family_form = False
             if "family_draft" in st.session_state:
                 del st.session_state.family_draft
+
+            with st.spinner("Continuing..."):
+                result = process_turn(
+                    st.session_state.conversation,
+                    "I'd like to skip adding companion details for now, let's continue.",
+                    st.session_state.llm_client,
+                )
+            st.session_state.chat_history.append(("assistant", result["reply"]))
+            if result.get("show_map"):
+                st.session_state.map_destination = result["show_map"]["destination"]
             st.rerun()
 
 
