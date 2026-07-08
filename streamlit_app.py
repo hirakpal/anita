@@ -522,6 +522,21 @@ def main():
         if rec:
             render_recommendation(rec)
 
+        cache_stats = getattr(st.session_state.llm_client, "stats", None)
+        if cache_stats and cache_stats.call_count > 0:
+            with st.expander("⚡ Prompt caching stats", expanded=False):
+                st.caption(
+                    "The static system prompt (~17K chars) is cached via "
+                    "cache_control; only the per-turn profile state is sent "
+                    "fresh each time. Cached reads cost ~10% of normal input "
+                    "token price."
+                )
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Cache reads", f"{cache_stats.cache_read_tokens:,} tok")
+                c2.metric("Cache writes", f"{cache_stats.cache_creation_tokens:,} tok")
+                c3.metric("Est. input savings", f"{cache_stats.estimated_savings_pct}%")
+                st.caption(f"{cache_stats.call_count} API call(s) made this session.")
+
         with st.expander("Debug: traveller_profile"):
             st.json(st.session_state.conversation.profile)
 
