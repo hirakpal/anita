@@ -114,20 +114,26 @@ def profile_is_sufficient(profile: dict) -> bool:
     return has_destination and has_duration and has_travelers
 
 
-def _build_turn_system_prompt(profile: dict) -> str:
+def _build_dynamic_profile_context(profile: dict) -> str:
     """
-    Build the system prompt for this specific turn by appending the
-    CURRENT accumulated profile state as grounded context.
+    Build the DYNAMIC (uncached) per-turn context block: the current
+    accumulated profile state as grounded JSON. Kept separate from
+    CHAT_ASSISTANT_SYSTEM_PROMPT (static, same every turn) specifically so
+    the static part can be cached via cache_control -- if this dynamic
+    block were concatenated into the same string as the static prompt,
+    every turn would produce a different prefix and never hit the cache,
+    since profile state changes turn to turn.
 
-    Why this exists: without it, the model only ever sees the plain reply
-    TEXT of its own past turns in conversation history -- never the
-    structured profile_updates it emitted via tool calls. That leaves it
-    unable to tell what's already known vs. still missing, which produces
-    two symptoms at once: re-asking for information already captured, and
-    (more seriously) fabricating plausible-sounding values to fill out the
-    schema since it has no grounded state to check itself against. Explicit
-    instruction here closes both: check this block before asking anything,
-    and never invent a value not present in it.
+    Why this content exists at all: without it, the model only ever sees
+    the plain reply TEXT of its own past turns in conversation history --
+    never the structured profile_updates it emitted via tool calls. That
+    leaves it unable to tell what's already known vs. still missing,
+    which produces two symptoms at once: re-asking for information
+    already captured, and (more seriously) fabricating plausible-sounding
+    values to fill out the schema since it has no grounded state to check
+    itself against. Explicit instruction here closes both: check this
+    block before asking anything, and never invent a value not present
+    in it.
     """
     try:
         profile_json = json.dumps(profile, indent=2)
@@ -139,8 +145,7 @@ def _build_turn_system_prompt(profile: dict) -> str:
         profile_json = "{}"
 
     return (
-        CHAT_ASSISTANT_SYSTEM_PROMPT
-        + "\n\n## Current known traveller_profile state (ground truth)\n"
+        "## Current known traveller_profile state (ground truth)\n"
         + "This is everything actually captured so far -- from this "
         + "conversation, the map exploration flow, or the family/group "
         + "member form. Check this before asking the user anything: do "
@@ -169,8 +174,9 @@ def process_turn(state: ConversationState, user_message: str, llm_client: LLMCli
     state.messages.append({"role": "user", "content": user_message})
 
     turn = llm_client.chat_structured(
-        system=_build_turn_system_prompt(state.profile),
+        system=CHAT_ASSISTANT_SYSTEM_PROMPT,
         messages=state.messages,
+        dynamic_context=_build_dynamic_profile_context(state.profile),
     )
 
     apply_profile_updates(state, turn.get("profile_updates", {}))
