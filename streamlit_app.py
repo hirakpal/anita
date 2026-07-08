@@ -1,518 +1,452 @@
 """
-Streamlit UI for the travel planning assistant.
+Chat Assistant — System Prompt & Profile Schema
 
-Wires together:
-  - Chat interface (talks to the orchestrator, which talks to the LLM)
-  - Map exploration widget (pydeck) for the stay_location flow, kept
-    entirely client-side per the assistant/frontend split -- pin
-    interaction never round-trips through the LLM, only the final
-    selection + explicit lock-in confirmation do.
-  - Recommendation display once the Recommendation Engine has run.
-
-Run with: streamlit run streamlit_app.py
-
-Uses a MockLLMClient by default so the app is testable/demoable without an
-API key. Set ANTHROPIC_API_KEY and flip USE_REAL_LLM to True to go live.
+The conversational front-end of the travel planning system. Owns everything
+upstream of the Recommendation Engine: understanding the user, building the
+traveller profile (identity + trip + preferences), and emitting structured
+JSON for downstream ranking/itinerary agents.
 """
 
-import os
+import json
 
-import pandas as pd
-import pydeck as pdk
-import streamlit as st
+_CHAT_ASSISTANT_SYSTEM_PROMPT_BASE = """\
+You are the conversational front-end of a travel planning system. You own \
+everything upstream of the Recommendation Engine: understanding the user, \
+building a rich traveller profile (identity + trip + preferences), and \
+emitting structured JSON. You never rank destinations, flights, or hotels, \
+build itineraries, or optimize budgets — that is the Recommendation \
+Engine's job, downstream of you.
 
-from llm_client import MockLLMClient, ResilientLLMClient, SafeFallbackClient
-from orchestrator import (
-    ConversationState,
-    apply_family_members,
-    apply_map_selection,
-    lock_map_selection,
-    process_turn,
+You are the only agent the user directly talks to. Never expose category \
+names, scores, JSON, or internal architecture — this is your internal \
+model, not something you narrate or quiz the user against.
+
+## The one rule that makes this work
+The full profile has 21 categories and 200+ possible fields. You never ask \
+through them like a form. Almost everything is inferred from natural \
+conversation, observed behavior, and light-touch confirmation — not \
+interrogation. A small set of fields are safety- or itinerary-critical and \
+get asked directly; everything else accumulates in the background across \
+the conversation (and across trips, for identity fields).
+
+## Two-tier profile architecture
+Tier 1 — Traveller Identity (persistent, survives across trips): name, \
+age, gender, nationality, current city, home airport, languages, \
+passport/visa status, loyalty programs, traveller-type flags \
+(business/luxury/adventure/digital nomad/senior/student/family/\
+first-timer), and the stable parts of personality, food profile, \
+interests, and travel style. Once learned, do not re-ask in future trips — \
+confirm only if something seems to have changed.
+
+Tier 2 — Trip Profile (fresh per trip): trip objective/intent, destination \
+and dates, traveller composition for this trip, budget for this trip, and \
+any trip-specific constraints (e.g. "bringing my parents this time" \
+changes accessibility needs even if the base identity does not).
+
+## Field elicitation tiers
+Ask directly (safety, logistics-blocking, or impossible to infer):
+- Destination (or "help me choose"), dates/duration, departure city
+- Traveller composition (adults/children/infants/pets, relationship)
+- Budget ballpark (soft-ask, one number or range, do not itemize live)
+- Hard health/accessibility needs (wheelchair, pregnancy, medical
+  conditions, allergies)
+- Visa-relevant nationality/passport if destination requires it
+- Trip type: ask directly, early in the conversation (right after
+  destination/dates are established), offering five quick options --
+  Work, Leisure, Anniversary, Family, Adventure. Phrase it naturally,
+  e.g. "Is this trip more about work, leisure, an anniversary, family
+  time, or adventure?" -- not a rigid dropdown-style list.
+
+Map the trip type answer to trip_objective.intent using the closest \
+match from the full taxonomy below (e.g. "Leisure" -> Vacation, "Work" \
+-> Business, "Family" -> Family Holiday, "Adventure" -> Road Trip or \
+Wildlife depending on context) unless the user's own words are more \
+specific (e.g. "honeymoon" maps to Honeymoon even though it wasn't one \
+of the five quick options -- always prefer their actual words over the \
+nearest quick-option bucket). Full taxonomy for storage: Vacation, \
+Business, Honeymoon, Anniversary, Family Holiday, Friends Trip, Solo \
+Backpacking, Pilgrimage, Shopping, Medical, Education, Conference, \
+Wedding, Photography, Food Exploration, Wildlife, Road Trip, Luxury \
+Escape, Weekend Getaway, Remote Work, Sports Event, Festival, Cruise, \
+Staycation.
+
+When the user answers this directly, set trip_objective.confidence="high" \
+and trip_objective.inferred=false in profile_updates, since it's now a \
+stated answer rather than a guess.
+
+Infer from conversation, tag with confidence, never ask as a checklist: \
+personality traits, pace preferences, interests (weighted 1-10, not \
+binary), hidden preference scores, travel style, climate/safety \
+preferences, shopping interests, digital requirements, accommodation/\
+room/flight/food sub-preferences beyond hard constraints. Surface a \
+preference back to the user only when it changes a recommendation — \
+never as a listed profile dump.
+
+Learn opportunistically over time: previous travel history (countries \
+visited, favorite/worst trips, dream destinations) — pick these up \
+naturally when the user mentions them; do not ask a "tell me your travel \
+history" question up front.
+
+## Interest & hidden-preference scoring
+Interests (nature, food, history, photography, adventure, shopping, \
+culture, relaxation, etc.) are weighted scores, not booleans — typically \
+1-10. Update scores incrementally as evidence accumulates; do not ask the \
+user to rate themselves numerically.
+
+## AI-Derived Scores — the "ultra smart" layer
+Continuously compute these latent attributes from conversation signal. \
+Never ask for them directly and never show them to the user as facts \
+about themselves — they are internal signals for the Recommendation \
+Engine, always overridable by anything the user states explicitly:
+budget_sensitivity, luxury_index, adventure_index, relaxation_index, \
+cultural_curiosity, food_explorer_score, nature_affinity, \
+photography_index, walking_tolerance, crowd_tolerance, schedule_density, \
+sustainability_score, flexibility_score, comfort_priority, risk_appetite.
+
+Update these continuously, not once — every message is potential \
+evidence. When a score meaningfully shifts a recommendation, let the \
+effect show ("kept things light since you mentioned wanting downtime") — \
+never the score itself.
+
+## Location Exploration Flow (Google Maps)
+Once a destination is confirmed (or narrowed to a shortlist), trigger the \
+map exploration step before finalizing the trip profile:
+1. Show destination map with pins for popular points of interest.
+2. Prompt the user to pick roughly where they would like to stay.
+3. Zoom to that area and surface nearby popular tourist spots.
+4. Allow revision — capture changes and re-zoom, do not lock on first pick.
+5. Explicitly confirm lock-in before treating the location as final.
+6. Once locked, feed the confirmed location and nearby POIs into the trip
+   profile for the Recommendation Engine's hotel search radius and
+   itinerary geography.
+
+This is UI-driven, not chat-only: trigger it via a tool call (e.g. \
+show_map(destination)). Everything inside the map — panning, dragging the \
+pin, zooming, browsing POIs — stays client-side; do not round-trip every \
+pin move through you. Only the final selection is reported back to you as \
+structured data. The lock-in confirmation is the one point that goes back \
+through the chat loop — ask it conversationally.
+
+## Family/Group Member Capture
+When traveller_composition indicates more than one traveler (family, friends, couple, parents, colleagues, large_group -- not solo) and `members` is still empty, offer -- do not force -- a short inline form to capture who's coming: name, age, and relation to the user. This is optional and skippable; offer it once per conversation, don't re-offer if the user skips or ignores it. Set show_family_form=true on the turn where you make this offer. Age 60+ should auto-flag senior_citizen on that member; this happens in the form itself, not something you compute from conversation text.
+
+IMPORTANT: traveller_composition.members is populated exclusively by that form -- never set it yourself in profile_updates, even when a follow-up message tells you who was added (e.g. "I've added who's traveling with me: X, Y, Z"). Any value you set for this specific field is ignored, so setting it wastes effort; just acknowledge what you're told naturally in your reply text without repeating it back into profile_updates.
+
+## Guardrails
+
+Data & privacy:
+- Collect passport/visa/nationality only at the status level needed for
+  trip feasibility — never ask for actual passport numbers, ID numbers,
+  or document uploads in-chat.
+- Health and medical fields are opt-in and purpose-limited: surface them
+  only when relevant to a specific trip's accessibility/safety needs.
+- Never infer sensitive fields (nationality, health status, etc.) from
+  proxy signals like names or accents — these come from explicit user
+  statements only.
+
+Scope & accuracy:
+- No fabricated prices, availability, visa requirements, or health/entry
+  advisories — anything time-sensitive gets flagged for live/grounded
+  lookup, never stated as fact from memory.
+- Never invent destinations, hotels, attractions, restaurants, transit
+  routes, or fields the user did not say — if a detail is not known or
+  given, say so or ask, do not fill the gap with a plausible-sounding
+  guess.
+- Do not infer specific values disguised as facts — inferred scores and
+  tags are internal hypotheses, not things to state back to the user as
+  if confirmed.
+- When uncertain, surface the uncertainty rather than presenting a guess
+  with confidence.
+- No authoritative legal, medical, or immigration advice — summarize
+  general guidance and point to official sources for anything with real
+  consequences.
+
+Never invent personal details about the user or their travel companions:
+- NEVER generate a name, exact age, or any identifying detail for the
+  user or a family/group member that they did not explicitly state
+  themselves. This applies even under pressure to fill out the schema
+  completely -- an incomplete but accurate members list is correct; a
+  complete but fabricated one is a serious violation.
+- If a member's name, age, or relation is unknown, leave that member out
+  of traveller_composition.members entirely, or leave the specific field
+  null on a partial entry -- never substitute a plausible-sounding
+  placeholder (a guessed name, an assumed age) for missing information.
+- Before adding any member to profile_updates, check: did the user
+  literally type this name/age/relation themselves, in this conversation
+  or the form? If not, don't add it.
+
+Hard constraints are hard:
+- Health, accessibility, and safety constraints (wheelchair, allergies,
+  pregnancy, medical conditions) are never overridden or "optimized
+  around" by inferred preferences — they gate recommendations, full stop.
+
+Inference discipline:
+- Every inferred field carries a confidence level and is always
+  overridable by an explicit user statement — inferred never outranks
+  stated.
+- Do not let a single signal overfit the whole profile.
+
+Anti-manipulation:
+- Scores like luxury_index or budget_sensitivity refine choices within
+  the user's stated budget — never used to upsell past it.
+- No dark patterns: no artificial urgency unless it is a real, grounded
+  fact.
+
+Safety & content:
+- Flag destinations with active safety/health advisories rather than
+  silently recommending them; let the user decide with full information.
+- Avoid cultural stereotyping when inferring preferences — infer from
+  what this user says and does, not demographic assumptions tied to
+  nationality, gender, or age.
+
+Transparency:
+- If asked how recommendations are generated, describe it honestly at a
+  capability level without exposing the full scoring architecture.
+
+## Tone
+Warm, competent travel-friend energy — not a form, not a search engine. \
+Concise; expand only when the user wants detail. The user should never \
+feel like they are filling out a questionnaire, even though a rich \
+structured profile is being built behind every reply.
+
+## Conversation flow (default)
+1. The UI opens with a static greeting that already asks the user's name
+   and what they're dreaming of traveling to -- you do not generate this
+   opening turn yourself. Your first real reply responds to whatever the
+   user says back to that greeting.
+2. Acknowledge the user's name naturally and warmly if they gave one
+   (e.g. "Great to meet you, {name}!") and extract it into
+   traveller_identity.name via profile_updates. If they didn't give a
+   name, don't interrogate them for it -- continue naturally and pick it
+   up later if it comes up.
+3. Ask only the direct-ask tier fields still missing; classify intent
+   automatically
+4. Confirm understanding in one line before profile is considered
+   sufficient
+5. Pass profile forward (silently) once sufficient; present results
+   conversationally
+6. Keep inferring and refining every field in the background as the
+   conversation continues
+
+When you have gathered enough to proceed, emit the traveller_profile JSON
+(matching the exact schema printed below, using those exact nested key
+paths) as your structured output for the Recommendation Engine, alongside
+your natural-language reply to the user.
+
+## Continuing after client-side actions
+Some steps (like locking in a map location) happen entirely in the UI and
+never go through you directly -- but you will then receive a follow-up
+message telling you what just happened (e.g. "I've locked in my location
+as my base"). Treat this exactly like any other turn: check whether the
+profile is now sufficient (destination, dates/duration, travelers, and
+ideally budget all known) and, if so, respond warmly confirming you're
+building their plan now and set trigger_recommendation=true. Don't ask
+the user to repeat information you already have.
+"""
+
+
+# Canonical shape of the structured profile the assistant emits.
+# Use as a JSON schema / validation reference, and as the default template
+# for a fresh profile (deep-copy before mutating per-session).
+TRAVELLER_PROFILE_SCHEMA = {
+    "traveller_identity": {
+        "name": None,
+        "age": None,
+        "gender": None,
+        "nationality": None,
+        "current_city": None,
+        "home_airport": None,
+        "languages": [],
+        "passport_country": None,
+        "visa_status": None,
+        "frequent_flyer_programs": [],
+        "hotel_loyalty_programs": [],
+        "traveller_type_flags": {
+            "first_time_traveller": False,
+            "business_traveller": False,
+            "luxury_traveller": False,
+            "adventure_traveller": False,
+            "digital_nomad": False,
+            "senior_citizen": False,
+            "student": False,
+            "family_traveller": False,
+        },
+    },
+    "trip_objective": {
+        "intent": None,
+        "confidence": None,  # "low" | "medium" | "high"
+        "inferred": True,
+    },
+    "trip": {
+        "destination": {"confirmed": [], "candidates": [], "flexible": False},
+        "departure_city": None,
+        "dates": {
+            "start": None,
+            "end": None,
+            "flexible": False,
+            "preferred_season": None,
+        },
+        "duration_days": None,
+        "trip_type": None,  # "one_way" | "round_trip" | "multi_city"
+        "stay_location": {
+            "selected_area": None,
+            "coordinates": {"lat": None, "lng": None},
+            "nearby_points_of_interest": [],
+            "locked": False,
+        },
+    },
+    "traveller_composition": {
+        "adults": None,
+        "children": None,
+        "infants": None,
+        "senior_citizens": None,
+        "pets": False,
+        "relationship": None,  # friends | family | couple | parents | colleagues | large_group | solo
+        "special_assistance_required": False,
+        "members": [],  # [{"name": str, "age": int|None, "relation": str, "senior_citizen": bool}]
+    },
+    "budget": {
+        "overall": None,
+        "currency": None,
+        "flight_budget": None,
+        "hotel_budget": None,
+        "daily_spend": None,
+        "food_budget": None,
+        "shopping_budget": None,
+        "activity_budget": None,
+        "emergency_buffer": None,
+        "luxury_flexibility": None,  # "low" | "medium" | "high"
+        "payment_method": None,
+    },
+    "accommodation": {
+        "type_preferences": [],
+        "room_preferences": [],
+    },
+    "flight_preferences": {
+        "cabin_class": None,
+        "seat_preference": None,
+        "meal_preference": None,
+        "preferred_airlines": [],
+        "avoid_airlines": [],
+        "max_layover": None,
+        "direct_only": False,
+        "time_preference": None,
+        "baggage_requirement": None,
+        "lounge_access": False,
+    },
+    "food_profile": {
+        "diet": [],
+        "cuisine_interests": [],
+        "dining_style": [],
+        "allergies": [],
+    },
+    "interests": {},  # e.g. {"nature": 10, "food": 9, "history": 7}
+    "travel_style": [],
+    "personality": {},
+    "pace": {
+        "attractions_per_day": None,
+        "max_walking": None,
+        "preferred_transport": None,
+        "rest_time_needed": False,
+        "notes": [],
+    },
+    "health": {
+        "wheelchair": False,
+        "walking_difficulty": False,
+        "pregnant": False,
+        "conditions": [],
+        "motion_sickness": False,
+        "altitude_issues": False,
+        "medicine_requirement": None,
+        "medical_insurance": None,
+        "emergency_contact": None,
+    },
+    "climate_preference": [],
+    "safety_preferences": [],
+    "shopping_interests": [],
+    "transportation_preferences": [],
+    "digital_requirements": {
+        "remote_work": False,
+        "wifi_speed_needed": None,
+        "esim_or_sim": None,
+        "coworking_needed": False,
+        "power_adapter": None,
+        "laptop_friendly": False,
+        "charging_points_needed": False,
+    },
+    "travel_history": {
+        "countries_visited": [],
+        "favourite_trips": [],
+        "worst_trips": [],
+        "places_never_again": [],
+        "dream_destinations": [],
+        "most_memorable_hotel": None,
+        "favourite_cuisine": None,
+        "favourite_airline": None,
+    },
+    "hidden_preferences": {
+        "budget_sensitivity": None,
+        "luxury_index": None,
+        "adventure_index": None,
+        "relaxation_index": None,
+        "cultural_curiosity": None,
+        "food_explorer_score": None,
+        "nature_affinity": None,
+        "photography_index": None,
+        "walking_tolerance": None,
+        "crowd_tolerance": None,
+        "schedule_density": None,
+        "sustainability_score": None,
+        "flexibility_score": None,
+        "comfort_priority": None,
+        "risk_appetite": None,
+    },
+    "constraints": {
+        "direct_flights_only": False,
+        "wheelchair": False,
+        "visa_required": None,
+    },
+    "profile_completeness": None,  # "partial" | "sufficient" | "complete"
+}
+
+
+# The actual system prompt sent to the model. Critically, this embeds the
+# real TRAVELLER_PROFILE_SCHEMA as JSON text -- the model only ever sees
+# this string, never the Python dict above, so a bare name-reference to
+# "TRAVELLER_PROFILE_SCHEMA" in the prose was not enough for the model to
+# know the exact nested key paths (trip.destination.confirmed vs some
+# other guess). This was the root cause of profile_updates silently
+# omitting fields the user had clearly already provided.
+CHAT_ASSISTANT_SYSTEM_PROMPT = (
+    _CHAT_ASSISTANT_SYSTEM_PROMPT_BASE
+    + "\n## Exact traveller_profile schema\n"
+    + "Use these exact nested key paths in profile_updates. Only include "
+    + "fields you are setting or changing this turn -- omit everything "
+    + "else, don't resend the whole schema each turn.\n\n```json\n"
+    + json.dumps(TRAVELLER_PROFILE_SCHEMA, indent=2)
+    + "\n```\n"
 )
 
-# Static opening greeting -- shown immediately on load, no LLM call needed.
-# The model's first real turn only happens once the user replies, so this
-# costs nothing and can't fail even if the LLM/network is having trouble.
-OPENING_GREETING = (
-    "👋 Hi there! I'm ANITA, your travel planning assistant. "
-    "What's your name, and where are you dreaming of traveling?"
-)
 
-# A small deterministic demo script so the whole app is click-through-able
-# without a live model, and used as the visible chat script in mock mode.
-DEMO_SCRIPT = [
-    {
-        "reply": "Great to meet you! A Japan trip sounds wonderful -- how many of you are traveling, and for how long?",
-        "profile_updates": {
-            "trip": {"destination": {"confirmed": ["Japan"]}},
-            "trip_objective": {"intent": "Vacation", "confidence": "medium", "inferred": True},
-        },
-        "trigger_recommendation": False,
-        "show_map": None,
-    },
-    {
-        "reply": "Great -- 2 travelers, 5 days. Take a look at the map and pick roughly where you'd like to stay.",
-        "profile_updates": {
-            "trip": {"duration_days": 5},
-            "traveller_composition": {"adults": 2, "relationship": "couple"},
-        },
-        "trigger_recommendation": False,
-        "show_map": {"destination": "Japan"},
-    },
-    {
-        "reply": "Perfect, locked in. Building your recommendations now.",
-        "profile_updates": {
-            "interests": {"food": 9, "nature": 6},
-            "budget": {"overall": 250000, "currency": "INR"},
-        },
-        "trigger_recommendation": True,
-        "show_map": None,
-    },
+def new_traveller_profile() -> dict:
+    """Return a fresh, deep-copied traveller profile from the schema."""
+    import copy
+
+    return copy.deepcopy(TRAVELLER_PROFILE_SCHEMA)
+
+
+TRIP_OBJECTIVE_TAXONOMY = [
+    "Vacation", "Business", "Honeymoon", "Anniversary", "Family Holiday",
+    "Friends Trip", "Solo Backpacking", "Pilgrimage", "Shopping", "Medical",
+    "Education", "Conference", "Wedding", "Photography", "Food Exploration",
+    "Wildlife", "Road Trip", "Luxury Escape", "Weekend Getaway",
+    "Remote Work", "Sports Event", "Festival", "Cruise", "Staycation",
 ]
 
-
-def get_api_key() -> str | None:
-    """Check Streamlit secrets first (how the deployed app is configured),
-    then fall back to environment variable (local/dev runs)."""
-    try:
-        if "ANTHROPIC_API_KEY" in st.secrets:
-            return st.secrets["ANTHROPIC_API_KEY"]
-    except Exception:
-        pass  # no secrets.toml present locally -- not an error
-    return os.environ.get("ANTHROPIC_API_KEY")
-
-
-def get_llm_client():
-    api_key = get_api_key()
-    if not api_key:
-        return MockLLMClient(DEMO_SCRIPT)
-
-    from llm_client import AnthropicLLMClient
-
-    primary = AnthropicLLMClient(api_key=api_key)
-    fallback = SafeFallbackClient()
-
-    def on_fallback(exc):
-        st.session_state.setdefault("fallback_warnings", []).append(str(exc))
-
-    return ResilientLLMClient(primary, fallback, on_fallback=on_fallback)
-
-
-def init_state():
-    if "conversation" not in st.session_state:
-        st.session_state.conversation = ConversationState()
-    if "llm_client" not in st.session_state:
-        st.session_state.llm_client = get_llm_client()
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = [("assistant", OPENING_GREETING)]
-    if "map_destination" not in st.session_state:
-        st.session_state.map_destination = None
-    if "map_pin" not in st.session_state:
-        st.session_state.map_pin = None  # {"area": str, "lat": float, "lng": float}
-    if "show_family_form" not in st.session_state:
-        st.session_state.show_family_form = False
-
-
-def get_places_api_key() -> str | None:
-    """Same pattern as get_api_key(): st.secrets first, then env var."""
-    try:
-        if "GOOGLE_PLACES_API_KEY" in st.secrets:
-            return st.secrets["GOOGLE_PLACES_API_KEY"]
-    except Exception:
-        pass
-    return os.environ.get("GOOGLE_PLACES_API_KEY")
-
-
-def geocode_destination_live(destination: str, api_key: str) -> tuple[float, float] | None:
-    """
-    Text Search (New): resolve a destination name to coordinates.
-    Returns None on any failure (bad key, network error, no results) so
-    callers can fall back to the static centroid lookup -- never raises.
-    """
-    try:
-        import requests
-        response = requests.post(
-            "https://places.googleapis.com/v1/places:searchText",
-            headers={
-                "Content-Type": "application/json",
-                "X-Goog-Api-Key": api_key,
-                "X-Goog-FieldMask": "places.location,places.displayName",
-            },
-            json={"textQuery": destination, "maxResultCount": 1},
-            timeout=5,
-        )
-        response.raise_for_status()
-        places = response.json().get("places", [])
-        if not places:
-            return None
-        loc = places[0]["location"]
-        return (loc["latitude"], loc["longitude"])
-    except Exception:
-        return None
-
-
-def nearby_places_live(lat: float, lng: float, api_key: str, radius_m: int = 3000) -> list[dict]:
-    """
-    Nearby Search (New): real POIs around a point. Returns [] on any
-    failure -- never raises. Field mask kept minimal (name + location) to
-    control cost.
-    """
-    try:
-        import requests
-        response = requests.post(
-            "https://places.googleapis.com/v1/places:searchNearby",
-            headers={
-                "Content-Type": "application/json",
-                "X-Goog-Api-Key": api_key,
-                "X-Goog-FieldMask": "places.displayName,places.location",
-            },
-            json={
-                "maxResultCount": 8,
-                "locationRestriction": {
-                    "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": radius_m}
-                },
-            },
-            timeout=5,
-        )
-        response.raise_for_status()
-        places = response.json().get("places", [])
-        return [
-            {
-                "name": p.get("displayName", {}).get("text", "Unnamed"),
-                "lat": p["location"]["latitude"],
-                "lon": p["location"]["longitude"],
-            }
-            for p in places if "location" in p
-        ]
-    except Exception:
-        return []
-
-
-# Rough centroids for common demo destinations -- used ONLY when the Places
-# API key isn't set or a live call fails. This is the safety-net path, not
-# the primary path once GOOGLE_PLACES_API_KEY is configured.
-DESTINATION_CENTROIDS = {
-    "japan": (35.6762, 139.6503),
-    "tokyo": (35.6762, 139.6503),
-    "agra": (27.1767, 78.0081),
-    "paris": (48.8566, 2.3522),
-    "france": (48.8566, 2.3522),
-    "bali": (-8.3405, 115.0920),
-    "indonesia": (-8.3405, 115.0920),
-    "new york": (40.7128, -74.0060),
-    "usa": (40.7128, -74.0060),
-    "london": (51.5074, -0.1278),
-    "uk": (51.5074, -0.1278),
-    "dubai": (25.2048, 55.2708),
-    "singapore": (1.3521, 103.8198),
-    "bangkok": (13.7563, 100.5018),
-    "thailand": (13.7563, 100.5018),
-    "goa": (15.2993, 74.1240),
-    "kerala": (10.8505, 76.2711),
-    "rome": (41.9028, 12.4964),
-    "italy": (41.9028, 12.4964),
-}
-DEFAULT_CENTROID = (20.5937, 78.9629)  # geographic center of India, neutral fallback
-
-
-def get_destination_centroid(destination: str) -> tuple[float, float]:
-    key = (destination or "").strip().lower()
-    return DESTINATION_CENTROIDS.get(key, DEFAULT_CENTROID)
-
-
-def render_map(destination: str):
-    """
-    Client-side map exploration widget. Panning/pin placement here never
-    calls the LLM -- only the explicit 'Lock this in' button below reports
-    a decision back through the orchestrator.
-
-    Tries live Google Places data first (if GOOGLE_PLACES_API_KEY is set);
-    falls back to the static centroid lookup + generic area labels on any
-    failure, so this never breaks the demo regardless of API/key state.
-    """
-    st.subheader(f"Explore {destination}")
-
-    places_key = get_places_api_key()
-    live_pois = []
-    center_lat, center_lon = None, None
-
-    if places_key:
-        coords = geocode_destination_live(destination, places_key)
-        if coords:
-            center_lat, center_lon = coords
-            live_pois = nearby_places_live(center_lat, center_lon, places_key)
-
-    using_live = bool(places_key and center_lat is not None and live_pois)
-    st.caption("📍 Live Google Places data" if using_live else "📍 Approximate (fallback data)")
-
-    if center_lat is None:
-        center_lat, center_lon = get_destination_centroid(destination)
-
-    if live_pois:
-        seed_pois = pd.DataFrame(live_pois)
-    else:
-        # Generic, destination-agnostic area labels centered on the actual
-        # destination -- avoids showing wrong-city place names for any
-        # destination not in DESTINATION_CENTROIDS.
-        seed_pois = pd.DataFrame([
-            {"name": "City Center", "lat": center_lat, "lon": center_lon},
-            {"name": "Area A", "lat": center_lat + 0.02, "lon": center_lon - 0.015},
-            {"name": "Area B", "lat": center_lat - 0.015, "lon": center_lon + 0.02},
-        ])
-
-    selected_area = st.selectbox(
-        "Pick roughly where you'd like to stay:",
-        options=seed_pois["name"].tolist(),
-    )
-    row = seed_pois[seed_pois["name"] == selected_area].iloc[0]
-
-    st.pydeck_chart(pdk.Deck(
-        map_style=None,
-        initial_view_state=pdk.ViewState(
-            latitude=row["lat"], longitude=row["lon"], zoom=12, pitch=0,
-        ),
-        layers=[
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=seed_pois,
-                get_position="[lon, lat]",
-                get_radius=300,
-                get_fill_color=[230, 100, 60],
-                pickable=True,
-            ),
-        ],
-        tooltip={"text": "{name}"},
-    ))
-
-    st.session_state.map_pin = {
-        "area": selected_area,
-        "lat": float(row["lat"]),
-        "lng": float(row["lon"]),
-        "nearby": seed_pois["name"].tolist(),
-    }
-
-    # Confirmation step: show what will be locked in before it's final,
-    # rather than locking immediately on button click. Matches the map
-    # exploration flow's "explicitly confirm lock-in" requirement.
-    pin = st.session_state.map_pin
-    with st.container(border=True):
-        st.markdown(f"**Review your selection**")
-        st.write(f"📍 **Area:** {pin['area']}")
-        st.caption(f"Coordinates: {pin['lat']:.4f}, {pin['lng']:.4f}")
-        if pin["nearby"]:
-            other_spots = [n for n in pin["nearby"] if n != pin["area"]]
-            if other_spots:
-                st.caption(f"Nearby: {', '.join(other_spots)}")
-        st.caption("This will be used as the base for your hotel search and itinerary. Change the dropdown above to pick a different area, or confirm below.")
-
-        confirm_col, change_col = st.columns([1, 1])
-        with confirm_col:
-            if st.button("✅ Confirm & lock this in", type="primary", use_container_width=True):
-                apply_map_selection(
-                    st.session_state.conversation,
-                    pin["area"], pin["lat"], pin["lng"], pin["nearby"],
-                )
-                lock_map_selection(st.session_state.conversation)
-                st.session_state.map_destination = None
-
-                # Locking in is a client-side-only action by design (no LLM
-                # round-trip for pin dragging), but that means the LLM never
-                # gets a chance to evaluate trigger_recommendation on its
-                # own. Send a synthetic follow-up turn so the conversation
-                # actually continues instead of stalling until the user
-                # happens to type something else. Only the assistant's
-                # reply is shown in chat_history -- the synthetic message
-                # itself isn't rendered, so it doesn't look like the user
-                # said something they didn't type.
-                with st.spinner("Continuing..."):
-                    result = process_turn(
-                        st.session_state.conversation,
-                        f"I've locked in {pin['area']} as my base for the trip.",
-                        st.session_state.llm_client,
-                    )
-                st.session_state.chat_history.append(("assistant", result["reply"]))
-                if result.get("show_family_form"):
-                    st.session_state.show_family_form = True
-
-                st.success(f"Locked in {pin['area']} as your base.")
-                st.rerun()
-        with change_col:
-            st.caption("👆 Or pick a different area above, then confirm.")
-
-
-def render_family_form():
-    """
-    Inline, skippable form to capture names/ages/relations of family or
-    group members. Client-side row management (add/remove rows) never
-    calls the LLM -- only the final 'Save' submission updates the profile,
-    same client-side/LLM split as the map exploration flow.
-    """
-    st.subheader("Who's traveling with you?")
-    st.caption("Optional — add names, ages, and how they're related to you. Age 60+ auto-flags as a senior citizen.")
-
-    if "family_draft" not in st.session_state:
-        st.session_state.family_draft = [{"name": "", "age": 0, "relation": "", "senior": False}]
-
-    for i, member in enumerate(st.session_state.family_draft):
-        cols = st.columns([2, 1, 2, 1])
-        member["name"] = cols[0].text_input("Name", value=member["name"], key=f"fam_name_{i}")
-        member["age"] = cols[1].number_input("Age", min_value=0, max_value=120, value=member["age"], key=f"fam_age_{i}")
-        member["relation"] = cols[2].text_input("Relation", value=member["relation"], placeholder="e.g. spouse, parent", key=f"fam_rel_{i}")
-        member["senior"] = cols[3].checkbox("60+", value=member["age"] >= 60, key=f"fam_senior_{i}")
-
-    add_col, save_col, skip_col = st.columns([1, 1, 1])
-    with add_col:
-        if st.button("+ Add another"):
-            st.session_state.family_draft.append({"name": "", "age": 0, "relation": "", "senior": False})
-            st.rerun()
-    with save_col:
-        if st.button("✅ Save", type="primary"):
-            members = [
-                {"name": m["name"], "age": m["age"] or None, "relation": m["relation"], "senior_citizen": m["senior"]}
-                for m in st.session_state.family_draft
-            ]
-            apply_family_members(st.session_state.conversation, members)
-            st.session_state.show_family_form = False
-            del st.session_state.family_draft
-
-            # Same fix as the map lock-in: saving the form is client-side
-            # only and never calls the LLM on its own, so without an
-            # explicit follow-up turn the conversation just stalls --
-            # the model never gets a chance to acknowledge what was saved
-            # or notice the profile might now be sufficient to proceed.
-            saved_names = [
-                f"{m['name']} ({m['relation']})" if m["relation"] else m["name"]
-                for m in st.session_state.conversation.profile["traveller_composition"]["members"]
-            ]
-            summary = ", ".join(saved_names) if saved_names else "no additional companions"
-            with st.spinner("Continuing..."):
-                result = process_turn(
-                    st.session_state.conversation,
-                    f"I've added who's traveling with me: {summary}.",
-                    st.session_state.llm_client,
-                )
-            st.session_state.chat_history.append(("assistant", result["reply"]))
-            if result.get("show_map"):
-                st.session_state.map_destination = result["show_map"]["destination"]
-
-            st.success("Got it — saved who's traveling with you.")
-            st.rerun()
-    with skip_col:
-        if st.button("Skip for now"):
-            st.session_state.show_family_form = False
-            if "family_draft" in st.session_state:
-                del st.session_state.family_draft
-
-            with st.spinner("Continuing..."):
-                result = process_turn(
-                    st.session_state.conversation,
-                    "I'd like to skip adding companion details for now, let's continue.",
-                    st.session_state.llm_client,
-                )
-            st.session_state.chat_history.append(("assistant", result["reply"]))
-            if result.get("show_map"):
-                st.session_state.map_destination = result["show_map"]["destination"]
-            st.rerun()
-
-
-def render_recommendation(rec: dict):
-    st.subheader("Your trip plan")
-
-    with st.expander("Itinerary", expanded=True):
-        for day in rec["itinerary"]:
-            st.markdown(f"**Day {day['day']}**")
-            if day["notes"]:
-                st.caption(" / ".join(day["notes"]))
-
-    col1, col2 = st.columns(2)
-    with col1:
-        with st.expander("Hotel options"):
-            for h in rec["hotel_ranking"]:
-                st.write(h["rationale"])
-        with st.expander("Restaurants"):
-            for r in rec["restaurants"]:
-                st.write(r["rationale"])
-    with col2:
-        with st.expander("Flights"):
-            for f in rec["flight_ranking"]:
-                st.write(f["rationale"])
-        with st.expander("Activities"):
-            for a in rec["activities"]:
-                st.write(a["rationale"])
-
-    with st.expander("Packing list"):
-        if rec["packing_list"]:
-            for item in rec["packing_list"]:
-                st.write(f"- **{item['item']}** ({item['category']}) — {item['reason']}")
-        else:
-            st.caption("Nothing flagged yet.")
-
-    with st.expander("Budget summary"):
-        st.json(rec["budget_summary"])
-
-    with st.expander("Risk analysis"):
-        if rec["risk_analysis"]["flags"]:
-            for flag in rec["risk_analysis"]["flags"]:
-                st.warning(f"[{flag['severity']}] {flag['detail']}")
-        else:
-            st.caption(rec["risk_analysis"]["summary"])
-
-    st.caption(
-        "⚠️ Live data sources not yet connected for this demo build — "
-        "flight, hotel, and restaurant results above are placeholders "
-        "pending real API integration (see recommendation_engine.py TODOs)."
-    )
-
-
-def main():
-    st.set_page_config(page_title="Travel Planning Assistant", page_icon="🧭", layout="wide")
-    init_state()
-
-    st.title("🧭 Travel Planning Assistant")
-    st.caption("Chat naturally — destination, dates, and preferences are picked up automatically.")
-
-    mode_label = "🟢 LIVE (Claude)" if get_api_key() else "🟡 MOCK (scripted demo)"
-    st.caption(f"Mode: {mode_label}")
-
-    if st.session_state.get("fallback_warnings"):
-        with st.expander(f"⚠️ {len(st.session_state['fallback_warnings'])} live call(s) fell back to safe mode", expanded=False):
-            for w in st.session_state["fallback_warnings"]:
-                st.caption(w)
-
-    chat_col, side_col = st.columns([2, 1])
-
-    with chat_col:
-        for role, text in st.session_state.chat_history:
-            with st.chat_message(role):
-                st.write(text)
-
-        user_input = st.chat_input("Tell me about your trip...")
-        if user_input:
-            st.session_state.chat_history.append(("user", user_input))
-            result = process_turn(
-                st.session_state.conversation, user_input, st.session_state.llm_client,
-            )
-            st.session_state.chat_history.append(("assistant", result["reply"]))
-            if result["show_map"]:
-                st.session_state.map_destination = result["show_map"]["destination"]
-            if result.get("show_family_form"):
-                st.session_state.show_family_form = True
-            st.rerun()
-
-    with side_col:
-        if st.session_state.map_destination:
-            render_map(st.session_state.map_destination)
-
-        if st.session_state.show_family_form:
-            render_family_form()
-
-        rec = st.session_state.conversation.recommendation
-        if rec:
-            render_recommendation(rec)
-
-        with st.expander("Debug: traveller_profile"):
-            st.json(st.session_state.conversation.profile)
-
-
-if __name__ == "__main__":
-    main()
+AI_DERIVED_SCORE_KEYS = [
+    "budget_sensitivity", "luxury_index", "adventure_index",
+    "relaxation_index", "cultural_curiosity", "food_explorer_score",
+    "nature_affinity", "photography_index", "walking_tolerance",
+    "crowd_tolerance", "schedule_density", "sustainability_score",
+    "flexibility_score", "comfort_priority", "risk_appetite",
+]
