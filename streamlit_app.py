@@ -280,16 +280,33 @@ def render_map(destination: str):
         "nearby": seed_pois["name"].tolist(),
     }
 
-    if st.button("Lock this in as my base for the trip"):
-        pin = st.session_state.map_pin
-        apply_map_selection(
-            st.session_state.conversation,
-            pin["area"], pin["lat"], pin["lng"], pin["nearby"],
-        )
-        lock_map_selection(st.session_state.conversation)
-        st.session_state.map_destination = None
-        st.success(f"Locked in {pin['area']} as your base.")
-        st.rerun()
+    # Confirmation step: show what will be locked in before it's final,
+    # rather than locking immediately on button click. Matches the map
+    # exploration flow's "explicitly confirm lock-in" requirement.
+    pin = st.session_state.map_pin
+    with st.container(border=True):
+        st.markdown(f"**Review your selection**")
+        st.write(f"📍 **Area:** {pin['area']}")
+        st.caption(f"Coordinates: {pin['lat']:.4f}, {pin['lng']:.4f}")
+        if pin["nearby"]:
+            other_spots = [n for n in pin["nearby"] if n != pin["area"]]
+            if other_spots:
+                st.caption(f"Nearby: {', '.join(other_spots)}")
+        st.caption("This will be used as the base for your hotel search and itinerary. Change the dropdown above to pick a different area, or confirm below.")
+
+        confirm_col, change_col = st.columns([1, 1])
+        with confirm_col:
+            if st.button("✅ Confirm & lock this in", type="primary", use_container_width=True):
+                apply_map_selection(
+                    st.session_state.conversation,
+                    pin["area"], pin["lat"], pin["lng"], pin["nearby"],
+                )
+                lock_map_selection(st.session_state.conversation)
+                st.session_state.map_destination = None
+                st.success(f"Locked in {pin['area']} as your base.")
+                st.rerun()
+        with change_col:
+            st.caption("👆 Or pick a different area above, then confirm.")
 
 
 def render_recommendation(rec: dict):
