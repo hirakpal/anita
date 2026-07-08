@@ -436,9 +436,21 @@ def render_recommendation(rec: dict):
         with st.expander("Flights"):
             for f in rec["flight_ranking"]:
                 st.write(f["rationale"])
-        with st.expander("Activities"):
-            for a in rec["activities"]:
-                st.write(a["rationale"])
+        with st.expander("Activities", expanded=True):
+            activities = rec["activities"]
+            if not activities or all(a.get("activity") is None for a in activities):
+                st.caption(activities[0]["rationale"] if activities else "No activities available.")
+            else:
+                for a in activities:
+                    if a.get("activity") is None:
+                        continue
+                    title = a["activity"].get("title", "Untitled")
+                    source = a["activity"].get("source", "unknown")
+                    badge = "🗂️ Curated guide" if source == "curated_corpus" else "📍 Live Google Places"
+                    score_str = f" · score {a['score']}" if a.get("score") is not None else ""
+                    st.markdown(f"**{title}**  \n`{badge}{score_str}`")
+                    st.caption(a["rationale"])
+                    st.markdown("---")
 
     with st.expander("Packing list"):
         if rec["packing_list"]:
