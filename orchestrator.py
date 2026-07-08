@@ -11,6 +11,7 @@ chat_assistant_role.md.
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -72,7 +73,28 @@ def _normalize_composition(profile: dict) -> None:
 
 
 def apply_profile_updates(state: ConversationState, updates: dict) -> None:
-    _deep_merge(state.profile, updates)
+    """
+    Merge LLM-authored profile_updates into state.profile, with one
+    deliberate exception: traveller_composition.members is UI-owned
+    ground truth -- only apply_family_members() (called from the form's
+    Save button) may write it. It's stripped from any incoming
+    LLM-authored updates before merging.
+
+    Why: the model can restate members in its own words on a later turn
+    (e.g. summarizing who's coming along) without necessarily including
+    every field (age, senior_citizen) that the form captured. Since lists
+    overwrite wholesale in _deep_merge, an incomplete restatement would
+    silently clobber correct form-entered data -- this was observed: ages
+    and senior_citizen flags disappearing after the very next assistant
+    turn. Treating this field as write-once-via-form-only closes that
+    permanently, and also removes any remaining fabrication surface for
+    this specific field, on top of the prompt-level guardrail.
+    """
+    sanitized = copy.deepcopy(updates)
+    composition_update = sanitized.get("traveller_composition")
+    if isinstance(composition_update, dict):
+        composition_update.pop("members", None)
+    _deep_merge(state.profile, sanitized)
     _normalize_composition(state.profile)
 
 
@@ -92,6 +114,45 @@ def profile_is_sufficient(profile: dict) -> bool:
     return has_destination and has_duration and has_travelers
 
 
+def _build_turn_system_prompt(profile: dict) -> str:
+    """
+    Build the system prompt for this specific turn by appending the
+    CURRENT accumulated profile state as grounded context.
+
+    Why this exists: without it, the model only ever sees the plain reply
+    TEXT of its own past turns in conversation history -- never the
+    structured profile_updates it emitted via tool calls. That leaves it
+    unable to tell what's already known vs. still missing, which produces
+    two symptoms at once: re-asking for information already captured, and
+    (more seriously) fabricating plausible-sounding values to fill out the
+    schema since it has no grounded state to check itself against. Explicit
+    instruction here closes both: check this block before asking anything,
+    and never invent a value not present in it.
+    """
+    try:
+        profile_json = json.dumps(profile, indent=2)
+    except (TypeError, ValueError):
+        # Defensive: if anything non-serializable ever slips into the
+        # profile, degrade to no state-injection for this turn rather
+        # than crashing the whole Streamlit process (which would wipe
+        # session_state for every connected user, not just this session).
+        profile_json = "{}"
+
+    return (
+        CHAT_ASSISTANT_SYSTEM_PROMPT
+        + "\n\n## Current known traveller_profile state (ground truth)\n"
+        + "This is everything actually captured so far -- from this "
+        + "conversation, the map exploration flow, or the family/group "
+        + "member form. Check this before asking the user anything: do "
+        + "not re-ask for fields that already have a non-null/non-empty "
+        + "value here. Do not invent or assume values for anything shown "
+        + "as null/empty -- only set a field in profile_updates when the "
+        + "user has actually just told you that information.\n\n```json\n"
+        + profile_json
+        + "\n```\n"
+    )
+
+
 def process_turn(state: ConversationState, user_message: str, llm_client: LLMClient) -> dict:
     """
     Process one user message: call the LLM for a structured turn, merge
@@ -108,7 +169,7 @@ def process_turn(state: ConversationState, user_message: str, llm_client: LLMCli
     state.messages.append({"role": "user", "content": user_message})
 
     turn = llm_client.chat_structured(
-        system=CHAT_ASSISTANT_SYSTEM_PROMPT,
+        system=_build_turn_system_prompt(state.profile),
         messages=state.messages,
     )
 
