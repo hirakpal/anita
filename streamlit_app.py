@@ -195,6 +195,9 @@ DESTINATION_CENTROIDS = {
     "japan": (35.6762, 139.6503),
     "tokyo": (35.6762, 139.6503),
     "agra": (27.1767, 78.0081),
+    "delhi": (28.6139, 77.2090),
+    "new delhi": (28.6139, 77.2090),
+    "mumbai": (19.0760, 72.8777),
     "paris": (48.8566, 2.3522),
     "france": (48.8566, 2.3522),
     "bali": (-8.3405, 115.0920),
@@ -526,6 +529,22 @@ def main():
     with side_col:
         if st.session_state.map_destination:
             render_map(st.session_state.map_destination)
+        else:
+            # Deterministic escape hatch: showing the map is currently
+            # gated on the model deciding to set show_map_destination on
+            # a given turn, which is a non-deterministic tool-call
+            # decision -- it doesn't always trigger reliably, especially
+            # for a SECOND destination later in a multi-city trip. Rather
+            # than keep chasing model behavior, give the user a manual
+            # way to open it themselves whenever a destination is known.
+            confirmed = st.session_state.conversation.profile.get("trip", {}).get("destination", {}).get("confirmed", [])
+            if confirmed:
+                with st.container(border=True):
+                    st.caption("📍 Want to explore a destination on the map yourself?")
+                    pick = st.selectbox("Destination", confirmed, key="manual_map_pick", label_visibility="collapsed")
+                    if st.button(f"Show map for {pick}", use_container_width=True):
+                        st.session_state.map_destination = pick
+                        st.rerun()
 
         if st.session_state.show_family_form:
             render_family_form()
