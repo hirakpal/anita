@@ -294,10 +294,65 @@ SCENARIO_MAP_LOCKIN_CONTINUES = GoldenConversation(
 )
 
 
+# ---------------------------------------------------------------------------
+# Scenario 6: no fabrication of a locked stay_location (regression test)
+# ---------------------------------------------------------------------------
+# INCIDENT: live testing caught the assistant narrating "let me show you a
+# map" and then, in a LATER turn, claiming a specific area was "confirmed"
+# and "locked" -- without the user ever having interacted with the actual
+# map widget. Root cause: nothing was stripping trip.stay_location from
+# LLM-authored profile_updates, so the model's self-reported claim silently
+# became the real profile state. Same fabrication-without-real-interaction
+# pattern as the family member names incident, just for location.
+
+SCENARIO_NO_FABRICATED_LOCATION = GoldenConversation(
+    name="no_fabrication_of_locked_location",
+    description=(
+        "REGRESSION TEST for a real incident: the model must never be able "
+        "to write a 'locked' stay_location into the profile that the user "
+        "never actually confirmed through the real map UI. Simulates the "
+        "exact failure by scripting a mock turn that TRIES to claim a "
+        "location is locked (reproducing what the live model actually "
+        "did), then asserts the structural protection blocks it."
+    ),
+    turns=[
+        GoldenTurn(
+            user_message="Sounds good, let's go with Agra",
+            mock_response={
+                "reply": "Perfect, Idgah is a solid central base -- confirmed!",
+                "profile_updates": {
+                    "trip": {
+                        "stay_location": {
+                            "selected_area": "Idgah Railway Station",
+                            "coordinates": {"lat": 27.17, "lng": 78.00},
+                            "locked": True,
+                        }
+                    }
+                },
+                "trigger_recommendation": False,
+                "show_map": None,
+                "show_family_form": False,
+            },
+        ),
+    ],
+    checks=[
+        Check(
+            "stay_location must stay unlocked -- user never interacted with the real map widget",
+            lambda p, r, s: p["trip"]["stay_location"]["locked"] is False,
+        ),
+        Check(
+            "selected_area must stay empty -- only the real map UI may set this",
+            lambda p, r, s: p["trip"]["stay_location"]["selected_area"] is None,
+        ),
+    ],
+)
+
+
 ALL_SCENARIOS: list[GoldenConversation] = [
     SCENARIO_BASIC_EXTRACTION,
     SCENARIO_NO_FABRICATION,
     SCENARIO_MEMBER_DATA_SURVIVES,
     SCENARIO_SENIOR_CITIZEN_DERIVATION,
     SCENARIO_MAP_LOCKIN_CONTINUES,
+    SCENARIO_NO_FABRICATED_LOCATION,
 ]

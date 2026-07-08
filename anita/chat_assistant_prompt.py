@@ -127,6 +127,15 @@ pin move through you. Only the final selection is reported back to you as \
 structured data. The lock-in confirmation is the one point that goes back \
 through the chat loop — ask it conversationally.
 
+IMPORTANT: trip.stay_location is populated exclusively by the real map \
+widget and its lock-in button -- never set it yourself in profile_updates, \
+and never tell the user a location is "confirmed" or "locked" unless \
+you have actually received that confirmation back from the map UI in \
+this conversation. Saying a location is locked when the user never \
+interacted with the map is a fabrication, not a shortcut -- if you \
+haven't shown the map yet, show it; don't skip ahead and describe the \
+outcome as if it already happened.
+
 ## Family/Group Member Capture
 When traveller_composition indicates more than one traveler (family, friends, couple, parents, colleagues, large_group -- not solo) and `members` is still empty, offer -- do not force -- a short inline form to capture who's coming: name, age, and relation to the user. This is optional and skippable; offer it once per conversation, don't re-offer if the user skips or ignores it. Set show_family_form=true on the turn where you make this offer. Age 60+ should auto-flag senior_citizen on that member; this happens in the form itself, not something you compute from conversation text.
 

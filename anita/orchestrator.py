@@ -74,26 +74,33 @@ def _normalize_composition(profile: dict) -> None:
 
 def apply_profile_updates(state: ConversationState, updates: dict) -> None:
     """
-    Merge LLM-authored profile_updates into state.profile, with one
-    deliberate exception: traveller_composition.members is UI-owned
-    ground truth -- only apply_family_members() (called from the form's
-    Save button) may write it. It's stripped from any incoming
-    LLM-authored updates before merging.
+    Merge LLM-authored profile_updates into state.profile, with two
+    deliberate exceptions -- fields that are UI-owned ground truth and
+    must only ever be written by the real user-driven flow, never by the
+    LLM claiming something happened in its own profile_updates:
 
-    Why: the model can restate members in its own words on a later turn
-    (e.g. summarizing who's coming along) without necessarily including
-    every field (age, senior_citizen) that the form captured. Since lists
-    overwrite wholesale in _deep_merge, an incomplete restatement would
-    silently clobber correct form-entered data -- this was observed: ages
-    and senior_citizen flags disappearing after the very next assistant
-    turn. Treating this field as write-once-via-form-only closes that
-    permanently, and also removes any remaining fabrication surface for
-    this specific field, on top of the prompt-level guardrail.
+    - traveller_composition.members: only apply_family_members() (the
+      form's Save button) may write it.
+    - trip.stay_location: only apply_map_selection() / lock_map_selection()
+      (the map UI's pin selection and explicit lock-in button) may write
+      it.
+
+    Why stay_location needed this too: confirmed live -- the model would
+    narrate "let me show you a map" and then, in a LATER turn, claim a
+    specific area was "confirmed" and locked, without the user ever
+    having interacted with the actual map widget at all. Since nothing
+    was stripping trip.stay_location from LLM-authored updates, that
+    self-reported claim silently became the real profile state -- the
+    exact same fabrication-without-real-interaction pattern as the
+    members incident, just for location instead of names.
     """
     sanitized = copy.deepcopy(updates)
     composition_update = sanitized.get("traveller_composition")
     if isinstance(composition_update, dict):
         composition_update.pop("members", None)
+    trip_update = sanitized.get("trip")
+    if isinstance(trip_update, dict):
+        trip_update.pop("stay_location", None)
     _deep_merge(state.profile, sanitized)
     _normalize_composition(state.profile)
 

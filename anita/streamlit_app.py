@@ -529,6 +529,22 @@ def main():
     with side_col:
         if st.session_state.map_destination:
             render_map(st.session_state.map_destination)
+        else:
+            # Deterministic escape hatch: showing the map is currently
+            # gated on the model deciding to set show_map_destination on
+            # a given turn, which is a non-deterministic tool-call
+            # decision -- it doesn't always trigger reliably, especially
+            # for a SECOND destination later in a multi-city trip. Rather
+            # than keep chasing model behavior, give the user a manual
+            # way to open it themselves whenever a destination is known.
+            confirmed = st.session_state.conversation.profile.get("trip", {}).get("destination", {}).get("confirmed", [])
+            if confirmed:
+                with st.container(border=True):
+                    st.caption("📍 Want to explore a destination on the map yourself?")
+                    pick = st.selectbox("Destination", confirmed, key="manual_map_pick", label_visibility="collapsed")
+                    if st.button(f"Show map for {pick}", use_container_width=True):
+                        st.session_state.map_destination = pick
+                        st.rerun()
 
         if st.session_state.show_family_form:
             render_family_form()
