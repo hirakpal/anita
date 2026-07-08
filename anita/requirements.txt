@@ -1,0 +1,7 @@
+streamlit>=1.59
+anthropic>=0.116
+pandas>=2.0
+pydeck>=0.9
+requests>=2.32
+scikit-learn>=1.5
+numpy>=1.26
