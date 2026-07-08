@@ -46,8 +46,34 @@ def _deep_merge(base: dict, updates: dict) -> dict:
     return base
 
 
+def _normalize_composition(profile: dict) -> None:
+    """
+    Re-derive senior_citizen status from age for every member, and recompute
+    the senior_citizens count, after ANY profile update -- not just ones
+    that went through apply_family_members(). This matters because the LLM
+    can also populate traveller_composition.members directly from
+    conversation text (profile_updates), bypassing the form entirely, and
+    that path has no built-in age->senior_citizen derivation of its own.
+    Running this after every merge makes the derivation correct regardless
+    of which path populated the data.
+    """
+    composition = profile.get("traveller_composition", {})
+    members = composition.get("members")
+    if not isinstance(members, list):
+        return
+    for m in members:
+        if isinstance(m, dict):
+            age = m.get("age")
+            if isinstance(age, (int, float)) and age >= 60:
+                m["senior_citizen"] = True
+    senior_count = sum(1 for m in members if isinstance(m, dict) and m.get("senior_citizen"))
+    if senior_count:
+        composition["senior_citizens"] = senior_count
+
+
 def apply_profile_updates(state: ConversationState, updates: dict) -> None:
     _deep_merge(state.profile, updates)
+    _normalize_composition(state.profile)
 
 
 def profile_is_sufficient(profile: dict) -> bool:
@@ -152,14 +178,22 @@ def apply_family_members(state: ConversationState, members: list[dict]) -> None:
     "relation", "senior_citizen"}. Recomputes traveller_composition's
     senior_citizens count from flagged members rather than trusting a
     stale value.
+
+    senior_citizen is derived from age (>=60) OR'd with any manually-set
+    flag -- not read from the manual flag alone. Streamlit checkbox
+    widgets only apply their `value=` default the first time they're
+    rendered; if age is entered after the checkbox already exists, the
+    checkbox keeps its stale old value instead of re-deriving from the
+    new age. Computing it here at save time, from the final age, sidesteps
+    that widget-staleness class of bug entirely.
     """
     composition = state.profile["traveller_composition"]
     composition["members"] = [
         {
             "name": m.get("name", "").strip(),
-            "age": m.get("age") or None,
+            "age": (age := m.get("age") or None),
             "relation": m.get("relation", "").strip() or None,
-            "senior_citizen": bool(m.get("senior_citizen", False)),
+            "senior_citizen": bool(m.get("senior_citizen", False)) or (age is not None and age >= 60),
         }
         for m in members if m.get("name", "").strip()
     ]
