@@ -54,23 +54,45 @@ class LLMClient(Protocol):
         ...
 
 
-TURN_RESPONSE_INSTRUCTIONS = """\
-Respond with ONLY a single JSON object, no markdown fences, no preamble, \
-matching this exact shape:
-
-{
-  "reply": "<natural language reply to show the user>",
-  "profile_updates": { <partial traveller_profile fields to merge, only \
-what changed this turn> },
-  "trigger_recommendation": <true if the profile is now sufficient to run \
-the Recommendation Engine, else false>,
-  "show_map": { "destination": "<destination name>" } or null
+CHAT_TURN_TOOL = {
+    "name": "record_turn",
+    "description": (
+        "Record this conversational turn: your reply to the user, any "
+        "traveller_profile fields you learned or inferred this turn, "
+        "whether the profile is now sufficient to run the Recommendation "
+        "Engine, and whether to trigger the map exploration flow."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "reply": {
+                "type": "string",
+                "description": "Natural-language reply to show the user. Never mention this tool, JSON, or internal fields.",
+            },
+            "profile_updates": {
+                "type": "object",
+                "description": (
+                    "Partial traveller_profile update, using the same nested "
+                    "shape as TRAVELLER_PROFILE_SCHEMA. Only include fields "
+                    "learned or changed this turn -- omit anything unchanged. "
+                    "Empty object if nothing new this turn."
+                ),
+            },
+            "trigger_recommendation": {
+                "type": "boolean",
+                "description": "True only if the profile is now sufficient to run the Recommendation Engine.",
+            },
+            "show_map_destination": {
+                "type": "string",
+                "description": (
+                    "Destination name to show the map exploration flow for, "
+                    "if this turn should trigger it. Empty string if not."
+                ),
+            },
+        },
+        "required": ["reply", "profile_updates", "trigger_recommendation", "show_map_destination"],
+    },
 }
-
-profile_updates should use the same nested shape as TRAVELLER_PROFILE_SCHEMA. \
-Only include fields you are setting or changing this turn -- omit anything \
-unchanged. Never include commentary outside the JSON object.
-"""
 
 
 class AnthropicLLMClient:
@@ -83,15 +105,27 @@ class AnthropicLLMClient:
         self.client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
 
     def chat_structured(self, system: str, messages: list[dict[str, str]]) -> dict[str, Any]:
-        full_system = system + "\n\n" + TURN_RESPONSE_INSTRUCTIONS
+        # Forced tool-use, not prompt-only JSON instructions: the model
+        # MUST call record_turn and its input arrives already parsed by
+        # the SDK -- this is materially more reliable than asking a model
+        # to format free text as JSON, which it can (and does, sometimes)
+        # ignore in favor of a natural conversational reply.
         response = self.client.messages.create(
             model=self.model,
             max_tokens=2000,
-            system=full_system,
+            system=system,
             messages=messages,
+            tools=[CHAT_TURN_TOOL],
+            tool_choice={"type": "tool", "name": "record_turn"},
         )
-        text = "".join(block.text for block in response.content if block.type == "text")
-        return _safe_parse_turn(text)
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "record_turn":
+                return _normalize_turn(block.input)
+        # Should be unreachable with forced tool_choice, but never trust
+        # that fully -- fall through to a safe empty turn rather than
+        # raising, so ResilientLLMClient's fallback path (which expects
+        # exceptions, not None) still isn't the only safety net.
+        raise ValueError("Model did not return a record_turn tool call despite forced tool_choice.")
 
     def complete_json(self, system: str, user_content: str) -> dict[str, Any]:
         response = self.client.messages.create(
@@ -194,6 +228,22 @@ class MockLLMClient:
         return result
 
 
+def _normalize_turn(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert a record_turn tool call's input (which uses the flat
+    show_map_destination string, since nullable object schemas are less
+    reliable across tool-use implementations) into the standard turn shape
+    the rest of the app expects (show_map: {"destination": str} | None).
+    """
+    destination = tool_input.get("show_map_destination", "") or ""
+    return {
+        "reply": tool_input.get("reply", ""),
+        "profile_updates": tool_input.get("profile_updates", {}) or {},
+        "trigger_recommendation": bool(tool_input.get("trigger_recommendation", False)),
+        "show_map": {"destination": destination} if destination.strip() else None,
+    }
+
+
 def _safe_parse_json(text: str) -> dict[str, Any]:
     """Parse arbitrary model JSON output, stripping stray markdown fences."""
     cleaned = text.strip()
@@ -206,13 +256,3 @@ def _safe_parse_json(text: str) -> dict[str, Any]:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
         raise ValueError(f"LLM did not return valid JSON: {e}\nRaw text: {text!r}")
-
-
-def _safe_parse_turn(text: str) -> dict[str, Any]:
-    """Parse model output into the chat-turn shape, stripping stray fences."""
-    parsed = _safe_parse_json(text)
-    parsed.setdefault("reply", "")
-    parsed.setdefault("profile_updates", {})
-    parsed.setdefault("trigger_recommendation", False)
-    parsed.setdefault("show_map", None)
-    return parsed
