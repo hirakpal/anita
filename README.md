@@ -76,14 +76,26 @@ needed to try it. To go live, set `ANTHROPIC_API_KEY` and flip
 ## Testing
 
 ```bash
-python tests/test_orchestrator.py
+python tests/test_orchestrator.py       # end-to-end orchestration test
+python tests/test_prompt_caching.py     # cache placement + stats tracking
+```
+
+## Evals
+
+Golden conversation scenarios, several encoding real bugs caught during
+live testing as permanent regression tests. See `evals/README.md`.
+
+```bash
+python evals/run_evals.py               # mock mode, no API key needed
+python evals/run_evals.py --client live # real model, needs ANTHROPIC_API_KEY
 ```
 
 ## Status
 
 Early scaffold. Chat Assistant profile-building and orchestration logic are
-tested end-to-end against a scripted conversation. Recommendation Engine
-sub-engines are structured with the correct guardrails (hard-constraint
-filtering, no fabricated facts, budget-as-ceiling) but most are stubs
-pending live data source integration — see `TODO`s in
-`recommendation_engine.py`.
+tested end-to-end against a scripted conversation. Prompt caching is
+implemented and verified (static system prompt cached, dynamic profile
+state sent fresh each turn). Recommendation Engine sub-engines are
+structured with the correct guardrails (hard-constraint filtering, no
+fabricated facts, budget-as-ceiling) but most are stubs pending live data
+source integration — see `TODO`s in `recommendation_engine.py`.
