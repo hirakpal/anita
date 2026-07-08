@@ -24,6 +24,7 @@ import streamlit as st
 from llm_client import MockLLMClient, ResilientLLMClient, SafeFallbackClient
 from orchestrator import (
     ConversationState,
+    apply_family_members,
     apply_map_selection,
     lock_map_selection,
     process_turn,
@@ -108,6 +109,8 @@ def init_state():
         st.session_state.map_destination = None
     if "map_pin" not in st.session_state:
         st.session_state.map_pin = None  # {"area": str, "lat": float, "lng": float}
+    if "show_family_form" not in st.session_state:
+        st.session_state.show_family_form = False
 
 
 def get_places_api_key() -> str | None:
@@ -317,6 +320,50 @@ def render_map(destination: str):
             st.caption("👆 Or pick a different area above, then confirm.")
 
 
+def render_family_form():
+    """
+    Inline, skippable form to capture names/ages/relations of family or
+    group members. Client-side row management (add/remove rows) never
+    calls the LLM -- only the final 'Save' submission updates the profile,
+    same client-side/LLM split as the map exploration flow.
+    """
+    st.subheader("Who's traveling with you?")
+    st.caption("Optional — add names, ages, and how they're related to you. Age 60+ auto-flags as a senior citizen.")
+
+    if "family_draft" not in st.session_state:
+        st.session_state.family_draft = [{"name": "", "age": 0, "relation": "", "senior": False}]
+
+    for i, member in enumerate(st.session_state.family_draft):
+        cols = st.columns([2, 1, 2, 1])
+        member["name"] = cols[0].text_input("Name", value=member["name"], key=f"fam_name_{i}")
+        member["age"] = cols[1].number_input("Age", min_value=0, max_value=120, value=member["age"], key=f"fam_age_{i}")
+        member["relation"] = cols[2].text_input("Relation", value=member["relation"], placeholder="e.g. spouse, parent", key=f"fam_rel_{i}")
+        member["senior"] = cols[3].checkbox("60+", value=member["age"] >= 60, key=f"fam_senior_{i}")
+
+    add_col, save_col, skip_col = st.columns([1, 1, 1])
+    with add_col:
+        if st.button("+ Add another"):
+            st.session_state.family_draft.append({"name": "", "age": 0, "relation": "", "senior": False})
+            st.rerun()
+    with save_col:
+        if st.button("✅ Save", type="primary"):
+            members = [
+                {"name": m["name"], "age": m["age"] or None, "relation": m["relation"], "senior_citizen": m["senior"]}
+                for m in st.session_state.family_draft
+            ]
+            apply_family_members(st.session_state.conversation, members)
+            st.session_state.show_family_form = False
+            del st.session_state.family_draft
+            st.success("Got it — saved who's traveling with you.")
+            st.rerun()
+    with skip_col:
+        if st.button("Skip for now"):
+            st.session_state.show_family_form = False
+            if "family_draft" in st.session_state:
+                del st.session_state.family_draft
+            st.rerun()
+
+
 def render_recommendation(rec: dict):
     st.subheader("Your trip plan")
 
@@ -397,11 +444,16 @@ def main():
             st.session_state.chat_history.append(("assistant", result["reply"]))
             if result["show_map"]:
                 st.session_state.map_destination = result["show_map"]["destination"]
+            if result.get("show_family_form"):
+                st.session_state.show_family_form = True
             st.rerun()
 
     with side_col:
         if st.session_state.map_destination:
             render_map(st.session_state.map_destination)
+
+        if st.session_state.show_family_form:
+            render_family_form()
 
         rec = st.session_state.conversation.recommendation
         if rec:
