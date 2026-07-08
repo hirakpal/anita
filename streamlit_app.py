@@ -314,6 +314,26 @@ def render_map(destination: str):
                 )
                 lock_map_selection(st.session_state.conversation)
                 st.session_state.map_destination = None
+
+                # Locking in is a client-side-only action by design (no LLM
+                # round-trip for pin dragging), but that means the LLM never
+                # gets a chance to evaluate trigger_recommendation on its
+                # own. Send a synthetic follow-up turn so the conversation
+                # actually continues instead of stalling until the user
+                # happens to type something else. Only the assistant's
+                # reply is shown in chat_history -- the synthetic message
+                # itself isn't rendered, so it doesn't look like the user
+                # said something they didn't type.
+                with st.spinner("Continuing..."):
+                    result = process_turn(
+                        st.session_state.conversation,
+                        f"I've locked in {pin['area']} as my base for the trip.",
+                        st.session_state.llm_client,
+                    )
+                st.session_state.chat_history.append(("assistant", result["reply"]))
+                if result.get("show_family_form"):
+                    st.session_state.show_family_form = True
+
                 st.success(f"Locked in {pin['area']} as your base.")
                 st.rerun()
         with change_col:
