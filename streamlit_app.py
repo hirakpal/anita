@@ -269,3 +269,122 @@ def render_map(destination: str):
                 get_fill_color=[230, 100, 60],
                 pickable=True,
             ),
+        ],
+        tooltip={"text": "{name}"},
+    ))
+
+    st.session_state.map_pin = {
+        "area": selected_area,
+        "lat": float(row["lat"]),
+        "lng": float(row["lon"]),
+        "nearby": seed_pois["name"].tolist(),
+    }
+
+    if st.button("Lock this in as my base for the trip"):
+        pin = st.session_state.map_pin
+        apply_map_selection(
+            st.session_state.conversation,
+            pin["area"], pin["lat"], pin["lng"], pin["nearby"],
+        )
+        lock_map_selection(st.session_state.conversation)
+        st.session_state.map_destination = None
+        st.success(f"Locked in {pin['area']} as your base.")
+        st.rerun()
+
+
+def render_recommendation(rec: dict):
+    st.subheader("Your trip plan")
+
+    with st.expander("Itinerary", expanded=True):
+        for day in rec["itinerary"]:
+            st.markdown(f"**Day {day['day']}**")
+            if day["notes"]:
+                st.caption(" / ".join(day["notes"]))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        with st.expander("Hotel options"):
+            for h in rec["hotel_ranking"]:
+                st.write(h["rationale"])
+        with st.expander("Restaurants"):
+            for r in rec["restaurants"]:
+                st.write(r["rationale"])
+    with col2:
+        with st.expander("Flights"):
+            for f in rec["flight_ranking"]:
+                st.write(f["rationale"])
+        with st.expander("Activities"):
+            for a in rec["activities"]:
+                st.write(a["rationale"])
+
+    with st.expander("Packing list"):
+        if rec["packing_list"]:
+            for item in rec["packing_list"]:
+                st.write(f"- **{item['item']}** ({item['category']}) — {item['reason']}")
+        else:
+            st.caption("Nothing flagged yet.")
+
+    with st.expander("Budget summary"):
+        st.json(rec["budget_summary"])
+
+    with st.expander("Risk analysis"):
+        if rec["risk_analysis"]["flags"]:
+            for flag in rec["risk_analysis"]["flags"]:
+                st.warning(f"[{flag['severity']}] {flag['detail']}")
+        else:
+            st.caption(rec["risk_analysis"]["summary"])
+
+    st.caption(
+        "⚠️ Live data sources not yet connected for this demo build — "
+        "flight, hotel, and restaurant results above are placeholders "
+        "pending real API integration (see recommendation_engine.py TODOs)."
+    )
+
+
+def main():
+    st.set_page_config(page_title="Travel Planning Assistant", page_icon="🧭", layout="wide")
+    init_state()
+
+    st.title("🧭 Travel Planning Assistant")
+    st.caption("Chat naturally — destination, dates, and preferences are picked up automatically.")
+
+    mode_label = "🟢 LIVE (Claude)" if get_api_key() else "🟡 MOCK (scripted demo)"
+    st.caption(f"Mode: {mode_label}")
+
+    if st.session_state.get("fallback_warnings"):
+        with st.expander(f"⚠️ {len(st.session_state['fallback_warnings'])} live call(s) fell back to safe mode", expanded=False):
+            for w in st.session_state["fallback_warnings"]:
+                st.caption(w)
+
+    chat_col, side_col = st.columns([2, 1])
+
+    with chat_col:
+        for role, text in st.session_state.chat_history:
+            with st.chat_message(role):
+                st.write(text)
+
+        user_input = st.chat_input("Tell me about your trip...")
+        if user_input:
+            st.session_state.chat_history.append(("user", user_input))
+            result = process_turn(
+                st.session_state.conversation, user_input, st.session_state.llm_client,
+            )
+            st.session_state.chat_history.append(("assistant", result["reply"]))
+            if result["show_map"]:
+                st.session_state.map_destination = result["show_map"]["destination"]
+            st.rerun()
+
+    with side_col:
+        if st.session_state.map_destination:
+            render_map(st.session_state.map_destination)
+
+        rec = st.session_state.conversation.recommendation
+        if rec:
+            render_recommendation(rec)
+
+        with st.expander("Debug: traveller_profile"):
+            st.json(st.session_state.conversation.profile)
+
+
+if __name__ == "__main__":
+    main()
