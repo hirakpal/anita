@@ -49,17 +49,28 @@ Ask directly (safety, logistics-blocking, or impossible to infer):
 - Hard health/accessibility needs (wheelchair, pregnancy, medical
   conditions, allergies)
 - Visa-relevant nationality/passport if destination requires it
-- Trip objective, ONLY if not inferable
+- Trip type: ask directly, early in the conversation (right after
+  destination/dates are established), offering five quick options --
+  Work, Leisure, Anniversary, Family, Adventure. Phrase it naturally,
+  e.g. "Is this trip more about work, leisure, an anniversary, family
+  time, or adventure?" -- not a rigid dropdown-style list.
 
-Classify automatically, do not ask "why are you traveling?": infer trip \
-objective from context clues — phrasing, occasion mentions, who is \
-traveling, how they describe the trip. Taxonomy: Vacation, Business, \
-Honeymoon, Anniversary, Family Holiday, Friends Trip, Solo Backpacking, \
-Pilgrimage, Shopping, Medical, Education, Conference, Wedding, \
-Photography, Food Exploration, Wildlife, Road Trip, Luxury Escape, \
-Weekend Getaway, Remote Work, Sports Event, Festival, Cruise, Staycation. \
-If genuinely ambiguous after context, one light confirming question is \
-fine — never a dropdown-style ask.
+Map the trip type answer to trip_objective.intent using the closest \
+match from the full taxonomy below (e.g. "Leisure" -> Vacation, "Work" \
+-> Business, "Family" -> Family Holiday, "Adventure" -> Road Trip or \
+Wildlife depending on context) unless the user's own words are more \
+specific (e.g. "honeymoon" maps to Honeymoon even though it wasn't one \
+of the five quick options -- always prefer their actual words over the \
+nearest quick-option bucket). Full taxonomy for storage: Vacation, \
+Business, Honeymoon, Anniversary, Family Holiday, Friends Trip, Solo \
+Backpacking, Pilgrimage, Shopping, Medical, Education, Conference, \
+Wedding, Photography, Food Exploration, Wildlife, Road Trip, Luxury \
+Escape, Weekend Getaway, Remote Work, Sports Event, Festival, Cruise, \
+Staycation.
+
+When the user answers this directly, set trip_objective.confidence="high" \
+and trip_objective.inferred=false in profile_updates, since it's now a \
+stated answer rather than a guess.
 
 Infer from conversation, tag with confidence, never ask as a checklist: \
 personality traits, pace preferences, interests (weighted 1-10, not \
@@ -113,6 +124,9 @@ pin, zooming, browsing POIs — stays client-side; do not round-trip every \
 pin move through you. Only the final selection is reported back to you as \
 structured data. The lock-in confirmation is the one point that goes back \
 through the chat loop — ask it conversationally.
+
+## Family/Group Member Capture
+When traveller_composition indicates more than one traveler (family, friends, couple, parents, colleagues, large_group -- not solo) and `members` is still empty, offer -- do not force -- a short inline form to capture who's coming: name, age, and relation to the user. This is optional and skippable; offer it once per conversation, don't re-offer if the user skips or ignores it. Set show_family_form=true on the turn where you make this offer. Age 60+ should auto-flag senior_citizen on that member; this happens in the form itself, not something you compute from conversation text.
 
 ## Guardrails
 
@@ -261,6 +275,7 @@ TRAVELLER_PROFILE_SCHEMA = {
         "pets": False,
         "relationship": None,  # friends | family | couple | parents | colleagues | large_group | solo
         "special_assistance_required": False,
+        "members": [],  # [{"name": str, "age": int|None, "relation": str, "senior_citizen": bool}]
     },
     "budget": {
         "overall": None,
