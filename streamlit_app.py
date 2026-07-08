@@ -29,11 +29,19 @@ from orchestrator import (
     process_turn,
 )
 
+# Static opening greeting -- shown immediately on load, no LLM call needed.
+# The model's first real turn only happens once the user replies, so this
+# costs nothing and can't fail even if the LLM/network is having trouble.
+OPENING_GREETING = (
+    "👋 Hi there! I'm ANITA, your travel planning assistant. "
+    "What's your name, and where are you dreaming of traveling?"
+)
+
 # A small deterministic demo script so the whole app is click-through-able
 # without a live model, and used as the visible chat script in mock mode.
 DEMO_SCRIPT = [
     {
-        "reply": "A Japan trip sounds wonderful! How many of you are traveling, and for how long?",
+        "reply": "Great to meet you! A Japan trip sounds wonderful -- how many of you are traveling, and for how long?",
         "profile_updates": {
             "trip": {"destination": {"confirmed": ["Japan"]}},
             "trip_objective": {"intent": "Vacation", "confidence": "medium", "inferred": True},
@@ -95,7 +103,7 @@ def init_state():
     if "llm_client" not in st.session_state:
         st.session_state.llm_client = get_llm_client()
     if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []  # [(role, text)] for rendering
+        st.session_state.chat_history = [("assistant", OPENING_GREETING)]
     if "map_destination" not in st.session_state:
         st.session_state.map_destination = None
     if "map_pin" not in st.session_state:
