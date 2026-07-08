@@ -102,11 +102,84 @@ def init_state():
         st.session_state.map_pin = None  # {"area": str, "lat": float, "lng": float}
 
 
-# Rough centroids for common demo destinations. Falls back to a neutral
-# default if the destination isn't in this list. This is a placeholder --
-# swap for a real geocoding API call (e.g. Google Geocoding) when wiring
-# a live provider; the Tokyo-hardcoded version this replaced showed wrong
-# neighborhood names for any non-Tokyo destination.
+def get_places_api_key() -> str | None:
+    """Same pattern as get_api_key(): st.secrets first, then env var."""
+    try:
+        if "GOOGLE_PLACES_API_KEY" in st.secrets:
+            return st.secrets["GOOGLE_PLACES_API_KEY"]
+    except Exception:
+        pass
+    return os.environ.get("GOOGLE_PLACES_API_KEY")
+
+
+def geocode_destination_live(destination: str, api_key: str) -> tuple[float, float] | None:
+    """
+    Text Search (New): resolve a destination name to coordinates.
+    Returns None on any failure (bad key, network error, no results) so
+    callers can fall back to the static centroid lookup -- never raises.
+    """
+    try:
+        import requests
+        response = requests.post(
+            "https://places.googleapis.com/v1/places:searchText",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": api_key,
+                "X-Goog-FieldMask": "places.location,places.displayName",
+            },
+            json={"textQuery": destination, "maxResultCount": 1},
+            timeout=5,
+        )
+        response.raise_for_status()
+        places = response.json().get("places", [])
+        if not places:
+            return None
+        loc = places[0]["location"]
+        return (loc["latitude"], loc["longitude"])
+    except Exception:
+        return None
+
+
+def nearby_places_live(lat: float, lng: float, api_key: str, radius_m: int = 3000) -> list[dict]:
+    """
+    Nearby Search (New): real POIs around a point. Returns [] on any
+    failure -- never raises. Field mask kept minimal (name + location) to
+    control cost.
+    """
+    try:
+        import requests
+        response = requests.post(
+            "https://places.googleapis.com/v1/places:searchNearby",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": api_key,
+                "X-Goog-FieldMask": "places.displayName,places.location",
+            },
+            json={
+                "maxResultCount": 8,
+                "locationRestriction": {
+                    "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": radius_m}
+                },
+            },
+            timeout=5,
+        )
+        response.raise_for_status()
+        places = response.json().get("places", [])
+        return [
+            {
+                "name": p.get("displayName", {}).get("text", "Unnamed"),
+                "lat": p["location"]["latitude"],
+                "lon": p["location"]["longitude"],
+            }
+            for p in places if "location" in p
+        ]
+    except Exception:
+        return []
+
+
+# Rough centroids for common demo destinations -- used ONLY when the Places
+# API key isn't set or a live call fails. This is the safety-net path, not
+# the primary path once GOOGLE_PLACES_API_KEY is configured.
 DESTINATION_CENTROIDS = {
     "japan": (35.6762, 139.6503),
     "tokyo": (35.6762, 139.6503),
@@ -141,18 +214,40 @@ def render_map(destination: str):
     Client-side map exploration widget. Panning/pin placement here never
     calls the LLM -- only the explicit 'Lock this in' button below reports
     a decision back through the orchestrator.
+
+    Tries live Google Places data first (if GOOGLE_PLACES_API_KEY is set);
+    falls back to the static centroid lookup + generic area labels on any
+    failure, so this never breaks the demo regardless of API/key state.
     """
     st.subheader(f"Explore {destination}")
 
-    # Generic, destination-agnostic area labels centered on the actual
-    # destination -- avoids showing wrong-city place names for any
-    # destination not in DESTINATION_CENTROIDS.
-    center_lat, center_lon = get_destination_centroid(destination)
-    seed_pois = pd.DataFrame([
-        {"name": "City Center", "lat": center_lat, "lon": center_lon},
-        {"name": "Area A", "lat": center_lat + 0.02, "lon": center_lon - 0.015},
-        {"name": "Area B", "lat": center_lat - 0.015, "lon": center_lon + 0.02},
-    ])
+    places_key = get_places_api_key()
+    live_pois = []
+    center_lat, center_lon = None, None
+
+    if places_key:
+        coords = geocode_destination_live(destination, places_key)
+        if coords:
+            center_lat, center_lon = coords
+            live_pois = nearby_places_live(center_lat, center_lon, places_key)
+
+    using_live = bool(places_key and center_lat is not None and live_pois)
+    st.caption("📍 Live Google Places data" if using_live else "📍 Approximate (fallback data)")
+
+    if center_lat is None:
+        center_lat, center_lon = get_destination_centroid(destination)
+
+    if live_pois:
+        seed_pois = pd.DataFrame(live_pois)
+    else:
+        # Generic, destination-agnostic area labels centered on the actual
+        # destination -- avoids showing wrong-city place names for any
+        # destination not in DESTINATION_CENTROIDS.
+        seed_pois = pd.DataFrame([
+            {"name": "City Center", "lat": center_lat, "lon": center_lon},
+            {"name": "Area A", "lat": center_lat + 0.02, "lon": center_lon - 0.015},
+            {"name": "Area B", "lat": center_lat - 0.015, "lon": center_lon + 0.02},
+        ])
 
     selected_area = st.selectbox(
         "Pick roughly where you'd like to stay:",
