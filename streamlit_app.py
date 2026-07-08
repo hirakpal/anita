@@ -102,6 +102,40 @@ def init_state():
         st.session_state.map_pin = None  # {"area": str, "lat": float, "lng": float}
 
 
+# Rough centroids for common demo destinations. Falls back to a neutral
+# default if the destination isn't in this list. This is a placeholder --
+# swap for a real geocoding API call (e.g. Google Geocoding) when wiring
+# a live provider; the Tokyo-hardcoded version this replaced showed wrong
+# neighborhood names for any non-Tokyo destination.
+DESTINATION_CENTROIDS = {
+    "japan": (35.6762, 139.6503),
+    "tokyo": (35.6762, 139.6503),
+    "agra": (27.1767, 78.0081),
+    "paris": (48.8566, 2.3522),
+    "france": (48.8566, 2.3522),
+    "bali": (-8.3405, 115.0920),
+    "indonesia": (-8.3405, 115.0920),
+    "new york": (40.7128, -74.0060),
+    "usa": (40.7128, -74.0060),
+    "london": (51.5074, -0.1278),
+    "uk": (51.5074, -0.1278),
+    "dubai": (25.2048, 55.2708),
+    "singapore": (1.3521, 103.8198),
+    "bangkok": (13.7563, 100.5018),
+    "thailand": (13.7563, 100.5018),
+    "goa": (15.2993, 74.1240),
+    "kerala": (10.8505, 76.2711),
+    "rome": (41.9028, 12.4964),
+    "italy": (41.9028, 12.4964),
+}
+DEFAULT_CENTROID = (20.5937, 78.9629)  # geographic center of India, neutral fallback
+
+
+def get_destination_centroid(destination: str) -> tuple[float, float]:
+    key = (destination or "").strip().lower()
+    return DESTINATION_CENTROIDS.get(key, DEFAULT_CENTROID)
+
+
 def render_map(destination: str):
     """
     Client-side map exploration widget. Panning/pin placement here never
@@ -110,12 +144,14 @@ def render_map(destination: str):
     """
     st.subheader(f"Explore {destination}")
 
-    # Seed points -- in production, pull real POI coordinates for the
-    # destination from a places API. Kept static here for the demo.
+    # Generic, destination-agnostic area labels centered on the actual
+    # destination -- avoids showing wrong-city place names for any
+    # destination not in DESTINATION_CENTROIDS.
+    center_lat, center_lon = get_destination_centroid(destination)
     seed_pois = pd.DataFrame([
-        {"name": "City Center", "lat": 35.6762, "lon": 139.6503},
-        {"name": "Shibuya", "lat": 35.6595, "lon": 139.7005},
-        {"name": "Asakusa", "lat": 35.7148, "lon": 139.7967},
+        {"name": "City Center", "lat": center_lat, "lon": center_lon},
+        {"name": "Area A", "lat": center_lat + 0.02, "lon": center_lon - 0.015},
+        {"name": "Area B", "lat": center_lat - 0.015, "lon": center_lon + 0.02},
     ])
 
     selected_area = st.selectbox(
