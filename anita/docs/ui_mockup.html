@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Travel Assistant — UI Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #12151B;
+    --jetbridge: #1D222B;
+    --jetbridge-hi: #262C37;
+    --boarding-pass: #EDEAE2;
+    --boarding-pass-dim: #9A9C9F;
+    --amber: #F2B705;
+    --blue: #4F8FC0;
+    --green: #5FA777;
+    --coral: #E2604F;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'IBM Plex Sans', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--ink);
+    color: var(--boarding-pass);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+  }
+  .app {
+    width: 100%;
+    max-width: 1180px;
+    height: 760px;
+    background: var(--jetbridge);
+    border-radius: 4px;
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    overflow: hidden;
+    box-shadow: 0 40px 80px rgba(0,0,0,0.5);
+  }
+
+  /* ---- Header bar ---- */
+  .topbar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    border-bottom: 1px solid rgba(237,234,226,0.08);
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .brand .mark {
+    width: 8px; height: 8px;
+    background: var(--amber);
+    border-radius: 50%;
+    box-shadow: 0 0 8px var(--amber);
+  }
+  .status-chip {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 3px;
+    background: rgba(95,167,119,0.15);
+    color: var(--green);
+    border: 1px solid rgba(95,167,119,0.35);
+  }
+
+  /* ---- Chat column ---- */
+  .chat-col {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .chat-scroll {
+    flex: 1;
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    overflow-y: auto;
+  }
+  .msg { display: flex; flex-direction: column; gap: 6px; max-width: 78%; }
+  .msg.assistant { align-self: flex-start; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--boarding-pass-dim);
+    text-transform: uppercase;
+  }
+  .bubble {
+    padding: 12px 16px;
+    border-radius: 3px;
+    font-size: 14.5px;
+    line-height: 1.55;
+  }
+  .msg.assistant .bubble {
+    background: var(--jetbridge-hi);
+    border-left: 2px solid var(--amber);
+  }
+  .msg.user .bubble {
+    background: rgba(79,143,192,0.12);
+    border-right: 2px solid var(--blue);
+  }
+  .chip-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .field-chip {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 9px;
+    border-radius: 3px;
+    background: rgba(242,183,5,0.1);
+    color: var(--amber);
+    border: 1px solid rgba(242,183,5,0.3);
+  }
+
+  .chat-input-row {
+    border-top: 1px solid rgba(237,234,226,0.08);
+    padding: 16px 28px 22px;
+    display: flex;
+    gap: 10px;
+  }
+  .chat-input {
+    flex: 1;
+    background: var(--ink);
+    border: 1px solid rgba(237,234,226,0.12);
+    border-radius: 3px;
+    padding: 12px 14px;
+    color: var(--boarding-pass);
+    font-family: var(--sans);
+    font-size: 14px;
+  }
+  .send-btn {
+    background: var(--amber);
+    color: var(--ink);
+    border: none;
+    border-radius: 3px;
+    padding: 0 20px;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+  }
+
+  /* ---- Sidebar ---- */
+  .sidebar {
+    border-left: 1px solid rgba(237,234,226,0.08);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .side-card { padding: 20px 24px; }
+  .side-label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    color: var(--boarding-pass-dim);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .side-label .tag {
+    color: var(--blue);
+    font-size: 10px;
+  }
+
+  /* Perforated divider — signature element */
+  .perforation {
+    position: relative;
+    height: 1px;
+    background: repeating-linear-gradient(
+      90deg, rgba(237,234,226,0.18) 0, rgba(237,234,226,0.18) 6px,
+      transparent 6px, transparent 12px
+    );
+    margin: 0 0;
+  }
+  .perforation::before, .perforation::after {
+    content: "";
+    position: absolute;
+    top: -5px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--ink);
+  }
+  .perforation::before { left: -5px; }
+  .perforation::after { right: -5px; }
+
+  .map-preview {
+    height: 150px;
+    border-radius: 3px;
+    background:
+      radial-gradient(circle at 30% 40%, rgba(79,143,192,0.35), transparent 55%),
+      radial-gradient(circle at 70% 65%, rgba(242,183,5,0.25), transparent 50%),
+      var(--ink);
+    position: relative;
+    overflow: hidden;
+    margin-bottom: 10px;
+  }
+  .pin {
+    position: absolute;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 0 4px rgba(242,183,5,0.2);
+  }
+  .pin.selected { background: var(--blue); box-shadow: 0 0 0 5px rgba(79,143,192,0.25); }
+
+  .lock-btn {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--green);
+    color: var(--green);
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    padding: 9px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+
+  .day-chip {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    font-size: 13px;
+    border-bottom: 1px solid rgba(237,234,226,0.06);
+  }
+  .day-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink);
+    background: var(--amber);
+    width: 22px; height: 22px;
+    border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    font-weight: 700;
+  }
+  .day-chip .desc { color: var(--boarding-pass-dim); font-size: 12.5px; }
+
+  .stat-row { display: flex; justify-content: space-between; font-size: 12.5px; padding: 6px 0; }
+  .stat-row .val { font-family: var(--mono); color: var(--boarding-pass); }
+  .stat-row.warn .val { color: var(--coral); }
+
+  .risk-flag {
+    font-size: 12px;
+    padding: 8px 10px;
+    border-radius: 3px;
+    background: rgba(226,96,79,0.1);
+    border: 1px solid rgba(226,96,79,0.3);
+    color: var(--boarding-pass);
+    margin-top: 6px;
+  }
+  .risk-flag .sev {
+    font-family: var(--mono);
+    color: var(--coral);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    margin-right: 6px;
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <div class="topbar">
+    <div class="brand"><span class="mark"></span> TRAVEL ASSISTANT</div>
+    <div class="status-chip">● LOCATION LOCKED</div>
+  </div>
+
+  <div class="chat-col">
+    <div class="chat-scroll">
+      <div class="msg assistant">
+        <div class="msg-label">Assistant</div>
+        <div class="bubble">A Japan trip sounds wonderful! How many of you are traveling, and roughly how many days?</div>
+      </div>
+
+      <div class="msg user">
+        <div class="msg-label">You</div>
+        <div class="bubble">2 of us, 5 days, sometime in October</div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="msg-label">Assistant</div>
+        <div class="bubble">Got it — take a look at the map and pick roughly where you'd like to stay.</div>
+        <div class="chip-row">
+          <span class="field-chip">2 travelers</span>
+          <span class="field-chip">5 days</span>
+          <span class="field-chip">October</span>
+        </div>
+      </div>
+
+      <div class="msg user">
+        <div class="msg-label">You</div>
+        <div class="bubble">Locking in Shibuya — we love good food and nature, not big on nightlife</div>
+      </div>
+
+      <div class="msg assistant">
+        <div class="msg-label">Assistant</div>
+        <div class="bubble">Perfect, locked in. Building your recommendations now — I'll keep things food and nature-forward.</div>
+      </div>
+    </div>
+
+    <div class="chat-input-row">
+      <input class="chat-input" placeholder="Tell me about your trip..." />
+      <button class="send-btn">SEND ➤</button>
+    </div>
+  </div>
+
+  <div class="sidebar">
+    <div class="side-card">
+      <div class="side-label">Explore · Japan <span class="tag">CLIENT-SIDE</span></div>
+      <div class="map-preview">
+        <div class="pin" style="top: 35%; left: 25%;"></div>
+        <div class="pin selected" style="top: 55%; left: 60%;"></div>
+        <div class="pin" style="top: 70%; left: 35%;"></div>
+      </div>
+      <button class="lock-btn">✓ LOCKED · SHIBUYA</button>
+    </div>
+
+    <div class="perforation"></div>
+
+    <div class="side-card">
+      <div class="side-label">Your Trip · 5 Days</div>
+      <div class="day-chip"><div class="day-num">1</div><div class="desc">Arrival · light pace, near Shibuya</div></div>
+      <div class="day-chip"><div class="day-num">2</div><div class="desc">Food tour + Meiji Shrine</div></div>
+      <div class="day-chip"><div class="day-num">3</div><div class="desc">Day trip · nature-forward</div></div>
+      <div class="day-chip"><div class="day-num">4</div><div class="desc">Markets + local dining</div></div>
+      <div class="day-chip"><div class="day-num">5</div><div class="desc">Departure</div></div>
+    </div>
+
+    <div class="perforation"></div>
+
+    <div class="side-card">
+      <div class="side-label">Budget Summary</div>
+      <div class="stat-row"><span>Ceiling</span><span class="val">₹2,50,000</span></div>
+      <div class="stat-row"><span>Planned</span><span class="val">— pending live pricing</span></div>
+      <div class="stat-row warn"><span>Status</span><span class="val">AWAITING DATA</span></div>
+    </div>
+
+    <div class="perforation"></div>
+
+    <div class="side-card">
+      <div class="side-label">Risk Analysis</div>
+      <div class="risk-flag"><span class="sev">LOW</span>No advisories connected yet — placeholder mode.</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
