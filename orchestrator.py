@@ -26,6 +26,7 @@ class ConversationState:
     recommendation: Optional[dict] = None
     pending_map_destination: Optional[str] = None
     map_locked: bool = False
+    family_form_offered: bool = False
 
 
 def _deep_merge(base: dict, updates: dict) -> dict:
@@ -92,6 +93,10 @@ def process_turn(state: ConversationState, user_message: str, llm_client: LLMCli
     if show_map:
         state.pending_map_destination = show_map.get("destination")
 
+    show_family_form = bool(turn.get("show_family_form", False)) and not state.family_form_offered
+    if show_family_form:
+        state.family_form_offered = True
+
     recommendation = None
     should_trigger = turn.get("trigger_recommendation", False) and profile_is_sufficient(state.profile)
     if should_trigger:
@@ -106,6 +111,7 @@ def process_turn(state: ConversationState, user_message: str, llm_client: LLMCli
     return {
         "reply": turn.get("reply", ""),
         "show_map": show_map,
+        "show_family_form": show_family_form,
         "recommendation": recommendation,
     }
 
@@ -136,3 +142,27 @@ def lock_map_selection(state: ConversationState) -> None:
     state.profile["trip"]["stay_location"]["locked"] = True
     state.map_locked = True
     state.pending_map_destination = None
+
+
+def apply_family_members(state: ConversationState, members: list[dict]) -> None:
+    """
+    Called by the UI layer when the user submits the family/group member
+    form (client-side interaction, same pattern as apply_map_selection --
+    not routed through the LLM). Each member dict: {"name", "age",
+    "relation", "senior_citizen"}. Recomputes traveller_composition's
+    senior_citizens count from flagged members rather than trusting a
+    stale value.
+    """
+    composition = state.profile["traveller_composition"]
+    composition["members"] = [
+        {
+            "name": m.get("name", "").strip(),
+            "age": m.get("age") or None,
+            "relation": m.get("relation", "").strip() or None,
+            "senior_citizen": bool(m.get("senior_citizen", False)),
+        }
+        for m in members if m.get("name", "").strip()
+    ]
+    senior_count = sum(1 for m in composition["members"] if m["senior_citizen"])
+    if senior_count:
+        composition["senior_citizens"] = senior_count
