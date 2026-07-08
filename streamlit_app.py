@@ -549,6 +549,38 @@ def main():
                 c3.metric("Est. input savings", f"{cache_stats.estimated_savings_pct}%")
                 st.caption(f"{cache_stats.call_count} API call(s) made this session.")
 
+        trace_store = getattr(st.session_state.llm_client, "traces", None)
+        if trace_store and trace_store.all():
+            with st.expander("🔍 Trace log", expanded=False):
+                summary = trace_store.summary()
+                st.caption(
+                    f"{summary['call_count']} call(s) · "
+                    f"{summary['error_count']} error(s) · "
+                    f"avg latency {summary['avg_latency_ms']}ms · "
+                    f"{summary['total_output_tokens']:,} output tokens total"
+                )
+                st.download_button(
+                    "⬇️ Download full trace log (JSON)",
+                    data=trace_store.to_json(),
+                    file_name="anita_trace_log.json",
+                    mime="application/json",
+                )
+                for t in trace_store.recent(10):
+                    status = "✅" if t.success else "❌"
+                    label = f"{status} {t.call_type} · {t.latency_ms:.0f}ms · \"{t.last_user_message[:50]}\""
+                    with st.expander(label, expanded=False):
+                        if t.error:
+                            st.error(t.error)
+                        st.caption("Dynamic context sent to the model this call:")
+                        st.code(t.dynamic_context_preview or "(none)", language="json")
+                        st.caption("Response received:")
+                        st.json(t.response if t.response else {})
+                        st.caption(
+                            f"cache_read={t.cache_read_tokens} · "
+                            f"cache_creation={t.cache_creation_tokens} · "
+                            f"input={t.input_tokens} · output={t.output_tokens}"
+                        )
+
         with st.expander("Debug: traveller_profile"):
             st.json(st.session_state.conversation.profile)
 
